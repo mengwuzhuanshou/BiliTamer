@@ -1,0 +1,42 @@
+# stale workspace-era leftovers at repo root
+/AndroidManifest.xml
+/build-stub/
+tools/libxposed/api.jar
+
+# build outputs
+build/
+dist/
+*.apk
+# prebuilt release APK committed for CI auto-release
+!apk/
+!apk/*.apk
+
+# signing keys must never be committed
+*.jks
+*.keystore
+*.pem
+signing.local
+
+# session leftovers / diagnostics
+NOTES.md
+HANDOVER/
+__pycache__/
+*.pyc
+tools/engine/__pycache__/
+tools/icon/*.ps1
+tools/ascii_icon.py
+tools/dump_local.py
+tools/gen_icon_bili.py
+tools/verify2.py
+tools/verify_icon_bili.py
+tools/libxposed/api-src/
+tools/libxposed/api_mirror*.jar
+tools/libxposed/gh.txt
+tools/libxposed/meta.xml
+tools/libxposed/releases.json
+
+# local junk
+*.log
+_tmp/
+.DS_Store
+Thumbs.db
