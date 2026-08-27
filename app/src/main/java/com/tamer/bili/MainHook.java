@@ -11,6 +11,7 @@ import com.tamer.bili.hooks.InteractHintHooks;
 import com.tamer.bili.hooks.IpLocationHooks;
 import com.tamer.bili.hooks.ListenPauseHooks;
 import com.tamer.bili.hooks.PlayerCodecHooks;
+import com.tamer.bili.hooks.ShareHooks;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -102,7 +103,8 @@ public class MainHook extends XposedModule implements HookApi {
                     + " hideTriple=" + isHideTriple()
                     + " hideVote=" + isHideVote()
                     + " hideUp=" + isHideUpPrompt()
-                    + " noRefresh=" + isNoAutoRefreshEnabled());
+                    + " noRefresh=" + isNoAutoRefreshEnabled()
+                    + " shareQq=" + isShareQqEnabled());
         } catch (Throwable t) {
             warn("logConfig failed: " + t);
         }
@@ -138,6 +140,11 @@ public class MainHook extends XposedModule implements HookApi {
             install("InteractHintHooks", new ThrowingAction() {
                 @Override public void run() throws Throwable {
                     new InteractHintHooks(MainHook.this, cl).install();
+                }
+            });
+            install("ShareHooks", new ThrowingAction() {
+                @Override public void run() throws Throwable {
+                    new ShareHooks(MainHook.this, cl).install();
                 }
             });
         }
@@ -314,6 +321,13 @@ public class MainHook extends XposedModule implements HookApi {
         BiliConfig c = config;
         return c != null && c.get(BiliConfig.KEY_NO_AUTO_REFRESH,
                 BiliConfig.defaultValueOf(BiliConfig.KEY_NO_AUTO_REFRESH));
+    }
+
+    @Override
+    public boolean isShareQqEnabled() {
+        BiliConfig c = config;
+        return c != null && c.get(BiliConfig.KEY_SHARE_QQ,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_SHARE_QQ));
     }
 
     @Override

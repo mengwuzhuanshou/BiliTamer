@@ -157,3 +157,27 @@ B 站在前台时 `uiautomator dump` 可能抓到后台应用的内容或报
 
 验证结果优先看模块日志与网络行为，截图/dump 仅作辅助。
 `logcat --pid=<pid>` 过滤可避开老缓冲行的干扰。
+
+## 13. 分享面板渠道：服务端渠道表 + 客户端白名单双闸，注入渠道补回入口
+
+国际版分享面板的渠道列表由服务端 `ShareChannels`（`above_channels`/`below_channels`）
+下发；客户端另有一道白名单 `Gt0.f.a`（含 QQ/QZONE/WEIXIN/SINA/COPY/GENERIC 及
+LINE/FACEBOOK 等国际社媒）。渠道项的图标与文案在应用内**硬编码**
+（`p411kl.j.d("QQ")` → 图标 res + 名称 res），点击统一进 `ShareTargetTask.f(channelId)`
+→ 分享引擎（BShare/com.bilibili.socialize）→ tauth QQ 互联 SDK
+（`assets/share_config.json` 的 `qq.appId` + `QQAssistActivity` 回调）。
+
+结论：QQ 分享的完整原生链路（弹 QQ 分享面板选好友/群）客户端**本来就有**，
+缺的只是服务端渠道条目——向 `ShareChannels.getAboveChannels()` 返回值追加一个
+`share_channel="QQ"` 的 `ChannelItem`（name/picture 设好，幂等去重）即可补回。
+
+要点与坑：
+
+* 渠道 getter 被多个面板复用（视频页 supermenu v2、番剧、fasthybrid），一处注入全覆盖；
+* **只注入一排**：above/below 同时注入会让面板出现两个 QQ（实测）；6.3.0 视频页 WEIXIN
+  在 above（第一排），QQ 应与微信同排，注入 above；
+* 渠道 getter 在视频页加载时就会被预取调用（不是等面板打开才调），注入日志会提前出现；
+* 未安装 QQ 时面板自身的渠道安装检查会隐藏该渠道，注入方无需自行判定；
+* 区分「完整分享」与「降级实现」：引擎对个别渠道可能只做复制链接+启动目标 App
+  （如 QuickWord 的 QQ 分支）。验证方法是看前台焦点——完整链路拉起的是目标 App 的
+  分享中转页（QQ 为 `QPublicTransFragmentActivity`），降级路径只会打开 App 主界面。

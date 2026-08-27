@@ -63,5 +63,8 @@ public interface HookApi {
     /** 首页不自动刷新开关。 */
     boolean isNoAutoRefreshEnabled();
 
+    /** 分享面板「分享到 QQ」开关。 */
+    boolean isShareQqEnabled();
+
     boolean isVerboseLoggingEnabled();
 }

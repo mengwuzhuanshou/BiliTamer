@@ -104,7 +104,13 @@ public class SettingsActivity extends Activity {
                 "听视频/迷你播放器播完当前视频后暂停，不自动切到下一集。\n"
                 + "零监听实现：仅拦截播放完成动作入口，无额外耗电");
 
-                section("隐藏互动提示", "Hide in-video prompts");
+                section("分享", "Share");
+        addSwitch(BiliConfig.KEY_SHARE_QQ, "分享面板添加「分享到 QQ」", "Add Share-to-QQ entry",
+                "国际版分享面板默认没有 QQ 入口；开启后补回该渠道，点击走 B 站自带\n"
+                + "的 QQ 互联分享链路（弹出 QQ 分享面板选好友/群）。需已安装手机 QQ；\n"
+                + "改后需强制停止 B 站重开");
+
+        section("隐藏互动提示", "Hide in-video prompts");
         addSwitch(BiliConfig.KEY_HIDE_TRIPLE, "隐藏一键三连", "Hide triple-like",
                 "隐藏点赞/投币/收藏连击动画与提示文案");
         addSwitch(BiliConfig.KEY_HIDE_VOTE, "隐藏投票", "Hide votes",

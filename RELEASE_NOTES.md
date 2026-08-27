@@ -1,4 +1,16 @@
-# v1.3.2 / Release notes
+# BiliTamer Release notes
+
+## v1.4.0
+
+* **新功能 / New**: 分享面板补回「分享到 QQ」入口（默认开）：向服务端下发的渠道列表注入
+  share_channel="QQ" 条目（与微信同排），点击复用 B 站自带 QQ 互联链路
+  （tauth + share_config.json 的 qq.appId），弹出 QQ 分享面板选好友/群——国内版同款效果。
+  实机验证：QQ 项与微信同行显示，点击拉起 com.tencent.mobileqq 的
+  QPublicTransFragmentActivity（QQ 分享确认页）。未安装 QQ 时面板自动隐藏该渠道。
+  / New Share-to-QQ entry in the share panel (on by default): a share_channel="QQ" item is
+  injected into the server-driven channel list (same row as WeChat), and tapping it reuses
+  the app's native QQ OpenSDK flow — verified on device (QQ's share confirmation page opens).
+  The entry hides automatically when QQ is not installed.
 
 ## v1.3.2
 

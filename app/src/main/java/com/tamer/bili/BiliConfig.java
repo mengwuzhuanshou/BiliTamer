@@ -53,6 +53,7 @@ public final class BiliConfig {
 
     // ===== 首页不自动刷新 =====
     public static final String KEY_NO_AUTO_REFRESH = "no_auto_refresh";
+    public static final String KEY_SHARE_QQ = "share_qq";           // 分享面板补回分享到 QQ
 
     // ===== 调试 =====
     public static final String KEY_DEBUG_ALIVE = "debug_alive_marker";
@@ -73,6 +74,7 @@ public final class BiliConfig {
         KEY_HIDE_VOTE,
         KEY_HIDE_UP_PROMPT,
         KEY_NO_AUTO_REFRESH,
+        KEY_SHARE_QQ,
         KEY_DEBUG_ALIVE,
         KEY_VERBOSE,
     };
@@ -89,6 +91,7 @@ public final class BiliConfig {
         if (KEY_VERBOSE.equals(key)) return false;
         if (KEY_NO_AUTO_REFRESH.equals(key)) return false;
         if (KEY_LISTEN_PAUSE_AFTER_END.equals(key)) return false;
+        if (KEY_SHARE_QQ.equals(key)) return true;      // 分享到 QQ 出厂默认开
         return false;
     }
 
