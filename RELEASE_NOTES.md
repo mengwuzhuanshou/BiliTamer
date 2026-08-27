@@ -13,7 +13,9 @@
   switched to signature matching; the feature now works.
 * **杂项 / Misc**: 详细日志关闭时保留每类改写的首条探针日志 / first-probe logging keeps
   diagnostics visible when verbose logging is off.
-* 首页/评论区横幅及其它评论区广告未在本版处理 / comment-area ads are not handled in this release.
+* 评论区限定模式（默认）下评论区无广告副作用；横幅等广告仅出现在全局声明（v1.2 旧行为）下
+  / the scoped mode (default) introduces no ads into the comment area; banner ads only appear
+  under the legacy global declaration.
 
 ## v1.3.1 / v1.3.0
 

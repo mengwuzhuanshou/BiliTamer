@@ -130,7 +130,10 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
 ## 已知限制 / Known limitations
 
 * 仅适配实测版本 6.3.0；其它版本需自行校准混淆锚点 / tested against 6.3.0 only;
-* 评论区横幅/其它评论区广告未处理 / comment-area banner & other comment ads not handled yet;
+* 国际版评论区目前没有广告；横幅等广告仅在使用全局身份声明（v1.2 旧行为）时出现，
+  默认的评论区限定模式无此副作用 / The international comment area currently has no ads;
+  banner ads only appear when the legacy global identity declaration is used — the default
+  scoped mode has no such side effect;
 * IP 属地依赖服务端策略，属风控敏感功能，是否显示由服务端决定 / the IP-location display is
   server-controlled and risk-control sensitive;
 * 主页 IP 标签依赖账号与服务端返回，个别页面可能无该字段 / the profile IP tag depends on the server response.
