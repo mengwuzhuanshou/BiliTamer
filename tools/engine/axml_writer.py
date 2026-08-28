@@ -187,7 +187,11 @@ class ManifestBuilder:
                               struct.pack("<II", p, u))
             elif item[0] == "se":
                 _, name_idx, attrs = item
-                el_ns = self.pool.index[NS_URI]
+                # aapt2 convention: the ELEMENT tag itself is never namespaced;
+                # only attributes carry the android ns. InstallerX's parser
+                # rejects element-level ns ("分析失败/不支持的文件格式") -
+                # root cause found & verified on device 2026-08-28.
+                el_ns = 0xFFFFFFFF
                 n_attr = len(attrs)
                 size = 16 + 8 + 12 + 20 * n_attr
                 buf = _node_head(0x0102, 16, size)
@@ -200,8 +204,7 @@ class ManifestBuilder:
             elif item[0] == "ee":
                 _, name_idx = item
                 chunks.append(_node_head(0x0103, 16, 24) +
-                              struct.pack("<II",
-                                          self.pool.index[NS_URI], name_idx))
+                              struct.pack("<II", 0xFFFFFFFF, name_idx))
 
         body_bytes = b"".join(chunks)
         total = 8 + len(spool) + len(rmap) + len(body_bytes)
