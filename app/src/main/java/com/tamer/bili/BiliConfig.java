@@ -31,9 +31,6 @@ public final class BiliConfig {
     public static final int IP_SCOPE_GLOBAL = 0;
     public static final int IP_SCOPE_COMMENT = 1;
 
-    // ===== AI 自动字幕源 =====
-    public static final String KEY_AI_SUBTITLE = "ai_subtitle_enabled";
-
     // ===== 播放器解码：0=自动 1=HEVC 2=AV1 =====
     public static final String KEY_CODEC = "codec_mode";
 
@@ -65,7 +62,6 @@ public final class BiliConfig {
         KEY_MASTER,
         KEY_IP_LOCATION,
         KEY_IP_SCOPE,
-        KEY_AI_SUBTITLE,
         KEY_CODEC,
         KEY_AUDIO_QUALITY,
         KEY_HDR,
@@ -83,7 +79,6 @@ public final class BiliConfig {
     public static boolean defaultValueOf(String key) {
         if (KEY_MASTER.equals(key)) return true;
         if (KEY_IP_LOCATION.equals(key)) return true;   // v1.1 起出厂默认开
-        if (KEY_AI_SUBTITLE.equals(key)) return false;
         if (KEY_HIDE_TRIPLE.equals(key)) return false;
         if (KEY_HIDE_VOTE.equals(key)) return false;
         if (KEY_HIDE_UP_PROMPT.equals(key)) return false;

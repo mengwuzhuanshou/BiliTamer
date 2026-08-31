@@ -215,9 +215,11 @@ class ManifestBuilder:
 def build_module_manifest(package, version_code, version_name,
                           min_sdk, target_sdk, app_label,
                           activities, meta_datas, allow_backup=False,
-                          icon_ref=None, utf16=False, order_std=False):
+                          icon_ref=None, utf16=False, order_std=False,
+                          providers=None):
     """activities: [{name,label,exported,launcher,module_settings}]
        meta_datas: [(name, value)]
+       providers: [{name,authorities,exported}]（可选，application 下的 provider 元素）
        icon_ref: "@drawable/ic_launcher" 的数字引用，如 "0x7f020000"（None=不写 icon 属性）
        utf16: 字符串池用 UTF-16（aapt 传统风格）
        order_std: manifest 属性按 aapt 顺序（versionCode/versionName 在前）"""
@@ -272,6 +274,13 @@ def build_module_manifest(package, version_code, version_name,
                 mb.end("category")
             mb.end("intent-filter")
         mb.end("activity")
+    for prov in (providers or []):
+        mb.start("provider", {
+            "name": ("str", prov["name"]),
+            "authorities": ("str", prov["authorities"]),
+            "exported": ("bool", bool(prov.get("exported", True))),
+        })
+        mb.end("provider")
     for mdname, mdvalue in meta_datas:
         if not isinstance(mdvalue, tuple):
             mdvalue = ("str", mdvalue)

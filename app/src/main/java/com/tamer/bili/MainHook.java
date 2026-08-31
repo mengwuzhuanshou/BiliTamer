@@ -4,7 +4,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
-import com.tamer.bili.hooks.AiSubtitleHooks;
 import com.tamer.bili.hooks.HomeNoAutoRefreshHooks;
 import com.tamer.bili.hooks.HookApi;
 import com.tamer.bili.hooks.InteractHintHooks;
@@ -95,7 +94,6 @@ public class MainHook extends XposedModule implements HookApi {
                     + " master=" + isMasterEnabled()
                     + " ip=" + isIpLocationEnabled()
                     + " ipScope=" + getIpScopeMode()
-                    + " aiSub=" + isAiSubtitleEnabled()
                     + " codec=" + getCodecMode()
                     + " audio=" + getAudioQuality()
                     + " hdr=" + getHdrMode()
@@ -114,11 +112,6 @@ public class MainHook extends XposedModule implements HookApi {
         install("IpLocationHooks", new ThrowingAction() {
             @Override public void run() throws Throwable {
                 new IpLocationHooks(MainHook.this, cl).install();
-            }
-        });
-        install("AiSubtitleHooks", new ThrowingAction() {
-            @Override public void run() throws Throwable {
-                new AiSubtitleHooks(MainHook.this, cl).install();
             }
         });
         install("PlayerCodecHooks", new ThrowingAction() {
@@ -261,13 +254,6 @@ public class MainHook extends XposedModule implements HookApi {
         BiliConfig c = config;
         if (c == null) return BiliConfig.defaultIntOf(BiliConfig.KEY_IP_SCOPE);
         return c.getInt(BiliConfig.KEY_IP_SCOPE, BiliConfig.defaultIntOf(BiliConfig.KEY_IP_SCOPE));
-    }
-
-    @Override
-    public boolean isAiSubtitleEnabled() {
-        BiliConfig c = config;
-        return c != null && c.get(BiliConfig.KEY_AI_SUBTITLE,
-                BiliConfig.defaultValueOf(BiliConfig.KEY_AI_SUBTITLE));
     }
 
     @Override

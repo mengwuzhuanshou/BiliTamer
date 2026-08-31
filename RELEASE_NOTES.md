@@ -1,5 +1,47 @@
 # BiliTamer Release notes
 
+## v1.6.0
+
+* **适配 / Adaptation**: 适配哔哩哔哩国际版 **6.4.0**（versionCode 不变，仍为 10）。6.4.0
+  大规模混淆漂移（moss 身份链、播放器核心、okretro 参数点全部换名），全部旧锚点保留为
+  6.3.0 候选，新锚点以候选列表形式并存 / Adapted to Bilibili international **6.4.0**. A
+  large-scale obfuscation drift (moss identity chain, player core, okretro param injection)
+  was remapped; every 6.3.0 anchor is kept as a candidate and the new anchors coexist in the
+  same candidate lists.
+* **修复 / Fixed**: 听视频「播完暂停」在 6.4.0 的全屏音频播放器上重新生效：6.4.0 听模式
+  完成事件已不在 mini-player biz 层（旧钩子保留但触发不了），改挂播放器核心完成回调——
+  播完后回退 0.8 秒并暂停、吞掉自动连播转发（completed 状态下直接 pause 是无操作，
+  必须先 seek）/ Pause-after-video works again on 6.4.0's fullscreen audio player: the
+  completion event left the mini-player biz layer, so the player-core completion callback is
+  hooked instead — seek back 0.8 s, pause, and swallow the auto-next forwarding (pause()
+  alone is a no-op in the completed state).
+* **修复 / Fixed**: 空间页 IP 属地在 6.4.0 重新生效：6.4.0 空间请求的身份在 REST URL 参数
+  （mobi_app=android_i）里而非 moss/proto 头，hook 空间页专属拦截器的 addCommonParam 改写
+  之——天然按页面定域 / Profile-page IP location works again on 6.4.0: the space request
+  identity now travels as a REST URL parameter (mobi_app=android_i) instead of a moss proto
+  header; the space-specific interceptor's addCommonParam rewrites it, which is scoped to the
+  space page by construction.
+* **杂项 / Misc**: 解码/音质/HDR 顺位、首页不自动刷新、隐藏互动提示、分享到 QQ 均在 6.4.0
+  复测通过 / codec/audio/HDR preference, no-home-auto-refresh, interaction-hint hiding and
+  Share-to-QQ re-verified on 6.4.0.
+* 构建 / Build: versionCode 10。
+
+## v1.5.0
+
+* **撤回 / Withdrawn**: 倍速解锁功能应要求撤回，不随本版本发布。该功能已完成开发与
+  实机验证（菜单注入 + 内核放行 + 时钟探针），技术结论存档于 PITFALLS #15：**native
+  层存在 3.0x 硬钳制**（`ffp_set_playback_rate` 从内部配置系统读上限覆盖请求值，
+  `FFP_PROP_FLOAT_MAX_SPEED` 为只读遥测），>3 档位为观感 placebo，突破需 Zygisk
+  原生 hook。下次若重启该功能，按 PITFALLS #14/#15 与 git 历史直接重建，无需重新逆向。
+  / The speed-unlock feature is withdrawn before release at the user's request. It was
+  fully developed and device-verified; findings are archived in PITFALLS #15: the native
+  layer clamps playback rate at 3.0x regardless of the requested value, entries above 3x
+  are placebo, and breaking it would require a Zygisk native hook.
+* **移除 / Removed**: AI 字幕源功能（含其绑定的 dm.v1 评论区限定分支）——实验性价值
+  有限且与 IP 属地共享的身份链路已由 scoped 模式覆盖 / The AI-subtitle feature is
+  removed (including its dm.v1 scoped-identity branch).
+* 构建 / Build: versionCode 9。
+
 ## v1.4.0
 
 * **新功能 / New**: 分享面板补回「分享到 QQ」入口（默认开）：向服务端下发的渠道列表注入

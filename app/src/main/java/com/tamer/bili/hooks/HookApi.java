@@ -44,8 +44,6 @@ public interface HookApi {
     /** 身份声明范围：BiliConfig.IP_SCOPE_GLOBAL=0 / IP_SCOPE_COMMENT=1。 */
     int getIpScopeMode();
 
-    boolean isAiSubtitleEnabled();
-
     int getCodecMode();
 
     int getAudioQuality();

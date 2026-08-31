@@ -55,7 +55,7 @@ public class SettingsActivity extends Activity {
         addSpace(dp * 4);
 
         TextView sub = new TextView(this);
-        sub.setText("目标应用：com.bilibili.app.in（国际版哔哩哔哩 6.3.0）\n"
+        sub.setText("目标应用：com.bilibili.app.in（国际版哔哩哔哩 6.3.0 / 6.4.0）\n"
                 + "IP 属地(出厂默认开)·解码/音质顺位 等——不配置也开箱即用。\n"
                 + "下方开关为个性化定制项：修改需要 root 同步一次配置。");
         sub.setTextColor(Color.parseColor("#666666"));
@@ -76,11 +76,6 @@ public class SettingsActivity extends Activity {
                 new int[]{BiliConfig.IP_SCOPE_COMMENT, BiliConfig.IP_SCOPE_GLOBAL},
                 "评论区限定可避免国内版身份带来的全局副作用（如评论区外广告）；\n"
                 + "主页 IP 属地走独立 REST 通道，两种模式下均生效。改后需强制停止 B 站重开。");
-
-        section("字幕", "Subtitle");
-        addSwitch(BiliConfig.KEY_AI_SUBTITLE, "获取 AI 自动生成字幕源", "AI subtitle source",
-                "DmView 请求按国内版身份下发，播放器字幕面板出现 AI 字幕轨道；\n"
-                + "字幕 URL 会打印到 LSPosed 日志（Tag: BiliTamer）便于导出");
 
         section("播放器", "Player");
         addRadio(BiliConfig.KEY_CODEC, "视频解码格式", "Video codec",

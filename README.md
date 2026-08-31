@@ -13,8 +13,8 @@
 > Not affiliated with Bilibili Inc.; trademarks and copyrights belong to their owners.
 > For learning and research on Android hooking techniques only.
 
-面向**国际版哔哩哔哩** `com.bilibili.app.in`（实测适配 **6.3.0**）的 LSPosed 模块。
-An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`, tested against **6.3.0**).
+面向**国际版哔哩哔哩** `com.bilibili.app.in`（实测适配 **6.3.0 / 6.4.0**）的 LSPosed 模块。
+An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`, tested against **6.3.0 / 6.4.0**).
 
 ---
 
@@ -24,11 +24,10 @@ An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`,
 | --- | --- | --- |
 | 评论/主页 IP 属地 IP location | 把请求身份改写为国内版客户端，服务端返回 location 字段，评论区「IP属地：」与主页 IP 标签随之显示 / Rewrite request identity to the domestic client so the server returns the location field (comment-area "IP location" and profile IP tag) | 开 on |
 | 身份声明范围 Identity scope | 评论区限定：仅评论/字幕请求声明国内版身份，其余请求保持国际版；或全局（旧行为）/ Scoped: declare the domestic identity for comment & subtitle requests only; or global (legacy behavior) | 评论区限定 scoped |
-| AI 字幕源 AI subtitles | 弹幕接口按国内版身份请求，播放器出现 AI 字幕轨道；字幕 URL 打进日志便于导出 / DmView requests carry the domestic identity so the AI-subtitle track appears; subtitle URL is logged for export | 关 off |
 | 解码顺位 Decoder preference | AV1 > HEVC > H264 自动顺位，或锁定某一种 / AV1 > HEVC > H264 auto preference, or lock one | 自动 auto |
 | 音质顺位 Audio preference | 杜比全景声 > Hi-Res > AAC 自动顺位，或锁定 / Dolby > Hi-Res > AAC auto preference, or lock | 自动 auto |
 | HDR 画质顺位 HDR preference | HDR Vivid > HDR > SDR 自动顺位，或锁定/关闭 / HDR Vivid > HDR > SDR auto preference, or lock/disable | 自动 auto |
-| 听视频听完暂停 Pause after video | 听视频/迷你播放器播完当前视频即暂停，不自动连播（零监听实现）/ Pause when the current video ends in mini-player instead of auto-advancing (zero-listener implementation) | 关 off |
+| 听视频听完暂停 Pause after video | 听视频（全屏音频播放器）播完当前视频即暂停，不自动连播（零监听实现）/ Pause when the current video ends in the listen-mode fullscreen audio player instead of auto-advancing (zero-listener implementation) | 关 off |
 | 隐藏互动提示 Hide interaction hints | 一键三连动画/文案、投票面板、UP 关注引导气泡 / Hide triple-action animation, vote panel and follow-bubble hints | 关 off |
 | 首页不自动刷新 No home auto-refresh | 从后台/其它页面切回首页时不自动重载推荐流；下拉/点 tab/首次进入不受影响 / Skip the automatic feed reload when returning to the home page; manual refresh unaffected | 关 off |
 | 分享到 QQ Share to QQ | 分享面板补回 QQ 渠道，点击走 B 站自带的 QQ 互联链路，弹出 QQ 分享面板选好友/群 / Restore the QQ channel in the share panel; tapping opens QQ's native share sheet (pick friends/groups) via the app's built-in QQ OpenSDK config | 开 on |
@@ -39,7 +38,7 @@ Every switch is independently reversible; the master switch disables the whole m
 ## 环境要求 / Requirements
 
 * 已 root 的 Android 设备：Magisk 或 KernelSU + Zygisk + LSPosed / rooted device with Zygisk + LSPosed;
-* 国际版哔哩哔哩 6.3.0（com.bilibili.app.in）/ international Bilibili 6.3.0.
+* 国际版哔哩哔哩 6.3.0 / 6.4.0（com.bilibili.app.in）/ international Bilibili 6.3.0 / 6.4.0.
 
 ## 使用方法 / Installation
 
@@ -51,15 +50,19 @@ Every switch is independently reversible; the master switch disables the whole m
 ### 实现要点 / How the identity rewrite works
 
 * 评论/字幕走 KMP moss gRPC：拦截图库「moss-common-headers」拦截器取 service/method，
-  proceed 前打 ThreadLocal 标记，身份头提供者（`up1.a.a()`）按标记把
+  proceed 前打 ThreadLocal 标记，身份头提供者按标记把
   `x-bili-metadata-bin`/`x-bili-device-bin` 里 mobiApp 字节从 `android_i` 改为 `android`
-  （protobuf 变长长度前缀同步重建）/ Comment & subtitle RPCs are scoped via the
-  moss-common-headers interceptor: before `chain.proceed()` the service/method is read and a
-  ThreadLocal marker set; the header provider then rewrites the mobiApp protobuf bytes
-  (`android_i` → `android`, rebuilding the varint length prefix);
-* 主页走 REST：okretro 公共参数注入点（`addCommonParamToUrl`）按 URL 作用域改 `mobi_app=android`
-  / Profile pages go through REST: the okretro common-param injection point rewrites
-  `mobi_app=android` per URL;
+  （protobuf 变长长度前缀同步重建）。6.3.0 锚点 `up1.a.a()`、6.4.0 锚点 `kr1.a.a()`
+  / Comment & subtitle RPCs are scoped via the moss-common-headers interceptor: before
+  `chain.proceed()` the service/method is read and a ThreadLocal marker set; the header
+  provider then rewrites the mobiApp protobuf bytes (`android_i` → `android`, rebuilding
+  the varint length prefix). 6.3.0 anchor `up1.a.a()`, 6.4.0 anchor `kr1.a.a()`;
+* 空间页走 REST：6.4.0 身份在 URL 参数里（`mobi_app=android_i`），hook 空间页 API 专属
+  拦截器的 `addCommonParam` 改写之——天然按页面定域。6.3.0 锚点为 okretro 公共参数注入点
+  `XA0.a` / Profile pages go through REST: on 6.4.0 the identity is a URL parameter
+  (`mobi_app=android_i`), rewritten via the space-API-specific interceptor's
+  `addCommonParam` — scoped to the space page by construction. The 6.3.0 anchor is the
+  okretro common-param injection point `XA0.a`;
 * 分享到 QQ：国际版分享面板的渠道列表由服务端下发（不含 QQ），而客户端白名单、图标文案
   与 QQ 互联配置（`assets/share_config.json` 的 qq.appId + tauth SDK + QQAssistActivity）
   原生齐全——向渠道 bean 的 getter 注入 share_channel="QQ" 条目（与微信同排）即可复用
@@ -117,7 +120,6 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
     │       ├── hooks/
     │       │   ├── HookApi.java            # hook 统一封装 / libxposed wrapper
     │       │   ├── IpLocationHooks.java    # 评论/主页 IP 属地 / scoped IP location
-    │       │   ├── AiSubtitleHooks.java    # AI 字幕源 / AI subtitle source
     │       │   ├── PlayerCodecHooks.java   # 解码/音质/HDR 顺位 / codec & audio & HDR preference
     │       │   ├── ListenPauseHooks.java   # 听视频听完暂停 / pause after video
     │       │   ├── InteractHintHooks.java  # 隐藏互动提示 / hide interaction hints
@@ -137,7 +139,8 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
 
 ## 已知限制 / Known limitations
 
-* 仅适配实测版本 6.3.0；其它版本需自行校准混淆锚点 / tested against 6.3.0 only;
+* 仅适配实测版本 6.3.0 / 6.4.0；其它版本需自行校准混淆锚点 / tested against 6.3.0 and
+  6.4.0 only;
 * 国际版评论区目前没有广告；横幅等广告仅在使用全局身份声明（v1.2 旧行为）时出现，
   默认的评论区限定模式无此副作用 / The international comment area currently has no ads;
   banner ads only appear when the legacy global identity declaration is used — the default

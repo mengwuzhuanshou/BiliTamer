@@ -35,6 +35,8 @@ public final class PlayerCodecHooks {
 
     private final HookApi api;
     private final ClassLoader cl;
+    private final java.util.concurrent.atomic.AtomicBoolean probeFnval =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public PlayerCodecHooks(HookApi api, ClassLoader cl) {
         this.api = api;
@@ -73,9 +75,26 @@ public final class PlayerCodecHooks {
         void run() throws Throwable;
     }
 
-    /** hook FG1.b 中返回 fnval 的静态方法（int 与 long 两种）。 */
+    /** hook 返回 fnval 的静态方法（int c() 与 long d()）。
+     *  6.3.0: FG1.b；6.4.0: 类迁到 gI1.e（方法名 c/d 未变）。 */
     private void installFnval() throws Throwable {
-        final Class<?> fg1b = api.load(cl, "FG1.b");
+        Class<?> fg1b = null;
+        String fnvalClsUsed = null;
+        for (String cn : new String[]{"FG1.b", "GI1.e"}) {
+            try {
+                Class<?> c = api.load(cl, cn);
+                boolean ok = true;
+                try { api.declaredMethod(c, "c"); } catch (Throwable t2) { ok = false; }
+                try { api.declaredMethod(c, "d"); } catch (Throwable t2) { ok = ok; }
+                if (ok) { fg1b = c; fnvalClsUsed = cn; break; }
+            } catch (Throwable next) {
+                // 下一候选
+            }
+        }
+        if (fg1b == null) {
+            api.warn("codec: fnval class not found (FG1.b / gI1.e)");
+            return;
+        }
         // int fnval
         Method c = null;
         try {
@@ -91,6 +110,11 @@ public final class PlayerCodecHooks {
                     if (!(result instanceof Integer)) return result;
                     int v = ((Integer) result).intValue();
                     int nv = applyFnvalBits(v);
+                    if (nv != v && probeFnval.compareAndSet(false, true)) {
+                        api.info("codec: fnval int " + v + " -> " + nv
+                                + " (codec=" + api.getCodecMode() + " audio=" + api.getAudioQuality()
+                                + " hdr=" + api.getHdrMode() + ")");
+                    }
                     return nv != v ? Integer.valueOf(nv) : result;
                 }
             });
@@ -110,11 +134,14 @@ public final class PlayerCodecHooks {
                     if (!(result instanceof Long)) return result;
                     long v = ((Long) result).longValue();
                     long nv = applySoftFnvalBits(v);
+                    if (nv != v && probeFnval.compareAndSet(false, true)) {
+                        api.info("codec: fnval long " + v + " -> " + nv);
+                    }
                     return nv != v ? Long.valueOf(nv) : result;
                 }
             });
         }
-        api.info("codec: fnval hook ok -> FG1.b.c()/d()");
+        api.info("codec: fnval hook ok -> " + fnvalClsUsed + ".c()/d()");
     }
 
     /** 自动顺位：AV1 > HEVC；锁定：只开对应位。 */

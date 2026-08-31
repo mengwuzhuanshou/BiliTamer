@@ -26,6 +26,7 @@ public final class HomeNoAutoRefreshHooks {
 
     private final HookApi api;
     private final ClassLoader cl;
+    private final java.util.concurrent.atomic.AtomicInteger homeAttempts = new java.util.concurrent.atomic.AtomicInteger(0);
 
     public HomeNoAutoRefreshHooks(HookApi api, ClassLoader cl) {
         this.api = api;
@@ -33,20 +34,25 @@ public final class HomeNoAutoRefreshHooks {
     }
 
     public void install() {
+        if (homeAttempts.incrementAndGet() > 30) {
+            api.warn("home: PegasusViewModel give up after 30 attempts");
+            return;
+        }
         try {
             final Class<?> vm = api.load(cl, "com.bilibili.pegasus.vm.PegasusViewModel");
             final Class<?> flush = api.load(cl, FLUSH_CLS);
-            // 找 z0 静态方法（方法名 z0 且第 3 参是 PegasusFlush）
+            // 结构匹配（跨版本稳定）：静态方法且第 3 参是 PegasusFlush。
+            // 6.3.0 方法名 z0，6.4.0 改名 y0 —— 不再依赖方法名。
             Method z0 = null;
             for (Method m : vm.getDeclaredMethods()) {
-                if (m.getName().equals("z0") && m.getParameterTypes().length >= 3
+                if (m.getParameterTypes().length >= 3
                         && m.getParameterTypes()[2] == flush) {
                     z0 = m;
                     break;
                 }
             }
             if (z0 == null) {
-                api.warn("home: PegasusViewModel.z0 not found");
+                api.warn("home: PegasusViewModel flush entry not found (name-agnostic match failed)");
                 return;
             }
             final Object autoBack = enumValue(flush, "AUTO_BACK_FROM_BACKGROUND");
@@ -74,9 +80,9 @@ public final class HomeNoAutoRefreshHooks {
                     return null; // 短路：不刷新，保留现有列表
                 }
             });
-            api.info("HomeNoAutoRefreshHooks installed -> PegasusViewModel.z0 (v2 has-content guard)");
+            api.info("HomeNoAutoRefreshHooks installed -> PegasusViewModel." + z0.getName() + " (v2 has-content guard)");
         } catch (ClassNotFoundException e) {
-            api.debug("home: PegasusViewModel not loaded yet, retry");
+            api.debug("home: PegasusViewModel not loaded yet, retry (attempt=" + homeAttempts.get() + ")");
             try {
                 api.postDelayed(new Runnable() {
                     @Override public void run() {

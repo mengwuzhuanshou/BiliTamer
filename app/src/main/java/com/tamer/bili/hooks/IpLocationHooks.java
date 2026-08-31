@@ -35,7 +35,6 @@ public final class IpLocationHooks {
 
     // 评论 RPC 服务与方法
     private static final String REPLY_SERVICE = "bilibili.main.community.reply.v1";
-    private static final String DM_SERVICE = "bilibili.community.service.dm.v1";
     private static final String[] REPLY_METHODS = {
         "MainList", "DetailList", "DialogList", "PreviewList", "ReplyInfo",
         "SearchItem", "SearchItemPreHook", "ShareRepliesInfo", "FoldList", "HotspotPage"
@@ -61,6 +60,23 @@ public final class IpLocationHooks {
     private final AtomicBoolean kmpHeaderReady = new AtomicBoolean(false);
     private final AtomicInteger kmpHeaderAttempts = new AtomicInteger(0);
 
+    private final AtomicInteger restParamsAttempts = new AtomicInteger(0);
+
+    private final java.util.concurrent.atomic.AtomicBoolean probeKmpEntry = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private final java.util.concurrent.atomic.AtomicBoolean probeIdpFire = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.Set<String> urlProbeSeen =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    private final java.util.concurrent.atomic.AtomicLong mossRpcCount =
+            new java.util.concurrent.atomic.AtomicLong(0);
+
+    private final java.util.Set<String> seenActivities =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    private final java.util.concurrent.atomic.AtomicBoolean spaceParamFired =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     // 运行时探针：verbose 关闭时，每类改写的第一条必打一行（无 logcat 也能确认活体）
     private final AtomicBoolean probeKmp = new AtomicBoolean(false);
     private final AtomicBoolean probeCommon = new AtomicBoolean(false);
@@ -71,6 +87,10 @@ public final class IpLocationHooks {
     /** 评论区限定模式：moss-common-headers 拦截器在 proceed 前设置的本次 RPC 服务名。
      *  up1.a.a() 在该拦截器内部被同步调用（同线程），凭此标记精确改写。 */
     private static final ThreadLocal<String> sCommonScope = new ThreadLocal<String>();
+
+    /** 空间页 UI 定域：页面打开后的时间窗（毫秒时间戳），窗口内 kr1.a.a 全部改写。
+     *  6.4.0 空间 REST 走 kntr 直连 provider，不经过 header.b，svc 无法定位，只能按 UI 定位。 */
+    private static volatile long sUiSpaceUntil = 0L;
 
     public IpLocationHooks(HookApi api, ClassLoader cl) {
         this.api = api;
@@ -174,19 +194,70 @@ public final class IpLocationHooks {
             api.warn("ip: kmp header value give up after " + MAX_RETRY + " attempts");
             return;
         }
+        // 6.3.0: up1.a.a() -> jp1.c(key, byte[])；6.4.0: 基类 kr1.a.a() -> Zq1.c(key, byte[])
+        // （子类 nr1.a=KMetadata / mr1.a=KDevice，a() 为 final 基类方法，hook 一处覆盖两者）。
+        // hooker 按字段扫描 String key + byte[] value，对两种包装类通用。
+        Class<?> cls = null;
+        String clsUsed = null;
+        for (String cn : new String[]{"up1.a", "kr1.a"}) {
+            try {
+                Class<?> c = api.load(cl, cn);
+                api.declaredMethod(c, "a"); // 确认形状
+                cls = c;
+                clsUsed = cn;
+                break;
+            } catch (Throwable next) {
+                // 下一候选
+            }
+        }
+        if (cls == null) {
+            if (kmpHeaderAttempts.get() >= MAX_RETRY) {
+                api.warn("ip: kmp header value give up (no provider candidate found)");
+            } else {
+                api.debug("ip: kmp header providers not present yet, retry in " + RETRY_DELAY_MS + "ms");
+                retry(new Runnable() {
+                    @Override public void run() {
+                        installKmpHeaderValue();
+                    }
+                });
+            }
+            return;
+        }
         try {
-            final Class<?> cls = api.load(cl, "up1.a");
             final Method m = api.declaredMethod(cls, "a");
             api.deoptimize(m);
             api.addHook("ip: kmp header value", m, new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                     Object result = chain.proceed();
-                    if (!api.isIpLocationEnabled() && !api.isAiSubtitleEnabled()) return result;
+                    if (!api.isIpLocationEnabled()) return result;
                     if (api.getIpScopeMode() == BiliConfig.IP_SCOPE_COMMENT) {
                         // 评论区限定模式：仅当本次 RPC 是评论/字幕服务时改写
                         if (sCommonScope.get() == null) return result;
                     }
+                    // 空间页 UI 定域：窗口内放行（6.4.0 空间通道不经过 header.b，无法按 svc 定位）
+                    if (sCommonScope.get() == null) {
+                        if (System.currentTimeMillis() >= sUiSpaceUntil) return result;
+                        if (probeKmpEntry.compareAndSet(false, true)) {
+                            api.info("ip: kmp hook fired (ui:space window)");
+                        }
+                    }
                     if (result == null) return result;
+                    if (probeKmpEntry.compareAndSet(false, true)) {
+                        String k0 = null; int len0 = -1; boolean hasOld = false;
+                        try {
+                            for (Field f0 : result.getClass().getDeclaredFields()) {
+                                f0.setAccessible(true);
+                                Object v = f0.get(result);
+                                if (f0.getType() == String.class && k0 == null && v != null) k0 = String.valueOf(v);
+                                if (f0.getType() == byte[].class && v instanceof byte[]) {
+                                    len0 = ((byte[]) v).length;
+                                    hasOld = indexOfBytes((byte[]) v, "android_i") >= 0;
+                                }
+                            }
+                        } catch (Throwable ignore0) { }
+                        api.info("ip: kmp hook fired key=" + k0 + " bytes=" + len0
+                                + " containsAndroidI=" + hasOld + " scope=" + sCommonScope.get());
+                    }
                     try {
                         String keyStr = null;
                         Field valF = null;
@@ -223,14 +294,7 @@ public final class IpLocationHooks {
                 }
             });
             kmpHeaderReady.set(true);
-            api.info("ip: kmp header value hook ok (attempt=" + kmpHeaderAttempts.get() + ")");
-        } catch (ClassNotFoundException e) {
-            api.debug("ip: up1.a not loaded yet, retry in " + RETRY_DELAY_MS + "ms");
-            retry(new Runnable() {
-                @Override public void run() {
-                    installKmpHeaderValue();
-                }
-            });
+            api.info("ip: kmp header value hook ok -> " + clsUsed + ".a (attempt=" + kmpHeaderAttempts.get() + ")");
         } catch (Throwable t) {
             api.error("ip: kmp header value hook failed", t);
         }
@@ -269,7 +333,11 @@ public final class IpLocationHooks {
             api.addHook("ip: common headers scope", m, new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                     // up1.a.a() 在本拦截器内部被同步调用：proceed 前设标记，改写才能赶在发请求前
-                    String want = computeWantedService(chain.getArg(0));
+                    long n = mossRpcCount.incrementAndGet();
+                if (n % 200 == 1) {
+                    api.info("ip: moss rpc count=" + n);
+                }
+                String want = computeWantedService(chain.getArg(0));
                     String old = sCommonScope.get();
                     if (want != null) sCommonScope.set(want);
                     try {
@@ -301,8 +369,7 @@ public final class IpLocationHooks {
             if (chainObj == null) return null;
             if (api.getIpScopeMode() != BiliConfig.IP_SCOPE_COMMENT) return null;
             boolean ip = api.isIpLocationEnabled();
-            boolean aiSub = api.isAiSubtitleEnabled();
-            if (!ip && !aiSub) return null;
+            if (!ip) return null;
             // chain -> grpc.c 上下文（MossInterceptor.b.a()）
             Object ctx = callNoArg(chainObj, "a", "MossInterceptor$e");
             if (ctx == null) ctx = callNoArg(chainObj, "a", "ignet.impl.grpc.c");
@@ -311,16 +378,30 @@ public final class IpLocationHooks {
                 logRewriteOnce("ctx", "ip: common headers ctx not found (chain=" + chainObj.getClass().getName() + ")");
                 return null;
             }
-            Object g = fieldTypedInHierarchy(ctx, "b", "jp1.g");
-            String svc = g == null ? null : strField(g, "a");
+            Object g = fieldTypedInHierarchy(ctx, "b", "Zq1.g");
+            if (g == null) g = fieldTypedInHierarchy(ctx, "b", "jp1.g");
+            // 6.3.0 jp1.g：service 在字段 a；6.4.0 Zq1.g(KMethodDescriptor)：
+            // a=packageName, b=serviceName, c=methodName —— 两者都试，取像服务名的那个
+            String svc = g == null ? null : strField(g, "b");
             String method = g == null ? null : strField(g, "c");
+            if (!isReplyService(svc)) {
+                String alt = strField(g, "a");
+                if (isReplyService(alt)) svc = alt;
+            }
             if (svc == null) {
                 // 兜底：k 也有服务名字段
-                Object k = fieldTypedInHierarchy(ctx, "a", "jp1.k");
+                Object k = fieldTypedInHierarchy(ctx, "a", "Zq1.k");
+                if (k == null) k = fieldTypedInHierarchy(ctx, "a", "jp1.k");
                 svc = k == null ? null : strField(k, "a");
             }
-            rememberService(svc);
-            boolean want = (ip && isReplyService(svc)) || (aiSub && isDmService(svc));
+            if (svc == null && g != null) {
+                logRewriteOnce("svc", "ip: method descriptor resolved but no service string (cls="
+                        + g.getClass().getName() + ")");
+            }
+            String pkg = g == null ? null : strField(g, "a");
+            rememberService(svc, pkg);
+            // 评论区限定：评论区 + 空间页 + 主页（各按服务名/包名识别，不做全局声明）
+            boolean want = ip && (isReplyService(svc) || isSpaceService(svc, pkg) || isHomeService(svc, pkg));
             if (!want) return null;
             if (api.isVerboseLoggingEnabled()) {
                 api.info("ip: scoped rewrite armed svc=" + svc + " method=" + method);
@@ -407,11 +488,12 @@ public final class IpLocationHooks {
         api.info(msg);
     }
 
-    private void rememberService(String svc) {
+    private void rememberService(String svc, String pkg) {
         if (svc == null || svc.length() == 0) return;
-        if (seenServices.size() >= 40) return;
-        if (seenServices.add(svc)) {
-            api.debug("ip: common headers interceptor saw service=" + svc);
+        String key = svc + "|" + (pkg == null ? "" : pkg);
+        if (seenServices.size() >= 80) return;
+        if (seenServices.add(key)) {
+            api.debug("ip: moss svc=" + svc + " pkg=" + pkg);
         }
     }
 
@@ -421,10 +503,20 @@ public final class IpLocationHooks {
         return svc.equals(REPLY_SERVICE) || svc.startsWith("bilibili.main.community.reply");
     }
 
-    /** 弹幕/AI 字幕服务判定。 */
-    private static boolean isDmService(String svc) {
-        if (svc == null) return false;
-        return svc.equals(DM_SERVICE) || svc.startsWith("bilibili.community.service.dm");
+    /** 空间页服务判定（个人主页 IP 属地；REST 之外 6.4.0 可能走 moss）。 */
+    private static boolean isSpaceService(String svc, String pkg) {
+        String s = svc == null ? null : svc.toLowerCase();
+        String p = pkg == null ? null : pkg.toLowerCase();
+        if (s != null && (s.startsWith("bilibili.app.space") || s.contains(".space."))) return true;
+        return p != null && (p.startsWith("bilibili.app.space") || p.contains(".space."));
+    }
+
+    /** 主页推荐服务判定（6.4.0 国际版首页 feed；限定武装，不做全局声明）。 */
+    private static boolean isHomeService(String svc, String pkg) {
+        String s = svc == null ? null : svc.toLowerCase();
+        String p = pkg == null ? null : pkg.toLowerCase();
+        if (s != null && (s.startsWith("bilibili.app.interfaces") || s.contains("pegasus"))) return true;
+        return p != null && (p.contains("bilibili.app.interfaces") || p.contains("pegasus"));
     }
 
     /** 改写 Metadata/Device 身份头（旧 moss / REST 路径）。 */
@@ -435,8 +527,15 @@ public final class IpLocationHooks {
             return;
         }
         try {
-            installByteProvider("mq0.a", "e", true);  // metadata
-            installByteProvider("mq0.a", "d", false); // device
+            try {
+                installByteProvider("mq0.a", "e", true);  // metadata (6.3.0)
+                installByteProvider("mq0.a", "d", false); // device
+            } catch (Throwable oldMissing) {
+                // 6.4.0: mq0.a 另作他用；REST 身份 provider 迁到 oq0.C0999a（e/d 同名，
+                // 见 Cq0.a.intercept 对 C0999a.e()/d() 的调用）
+                installByteProvider("oq0.a", "e", true);  // metadata (6.4.0)
+                installByteProvider("oq0.a", "d", false); // device
+            }
             identityReady.set(true);
             api.info("ip: identity provider hooks ok (attempt=" + identityAttempts.get() + ")");
         } catch (ClassNotFoundException e) {
@@ -474,6 +573,10 @@ public final class IpLocationHooks {
             @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                 Object result = chain.proceed();
                 if (!api.isIpLocationEnabled()) return result;
+                if (probeIdpFire.compareAndSet(false, true)) {
+                    api.info("ip: identity provider fired " + clsName + "." + methodName
+                            + " scope=" + sScope.get());
+                }
                 if (sScope.get() == null) return result;
                 if (!(result instanceof byte[])) return result;
                 byte[] rewritten = rewriteIdentity((byte[]) result, isMetadata);
@@ -492,53 +595,250 @@ public final class IpLocationHooks {
         api.info("ip: identity provider hook ok -> " + clsName + "." + methodName);
     }
 
-    /** 用 protobuf 解析并改写身份字段（旧 moss / REST）。 */
+    /** 用 protobuf 解析并改写身份字段（旧 moss / REST）。
+     *  6.4.0 proto 类改名：Metadata->KMetadata、Device->KDevice；类加载失败时
+     *  兜底用字节级 mobi_app 替换（长度前缀校验，安全幂等）。 */
     private byte[] rewriteIdentity(byte[] src, boolean isMetadata) {
+        String[] candidates = isMetadata
+                ? new String[]{"com.bapis.bilibili.metadata.Metadata", "com.bapis.bilibili.metadata.KMetadata"}
+                : new String[]{"com.bapis.bilibili.metadata.device.Device", "com.bapis.bilibili.metadata.device.KDevice"};
         try {
-            if (isMetadata) {
-                Class<?> cls = loadQuiet("com.bapis.bilibili.metadata.Metadata");
-                if (cls == null) return null;
+            for (String cn : candidates) {
+                Class<?> cls = loadQuiet(cn);
+                if (cls == null) continue;
                 Object msg = invokeStatic(cls, "parseFrom", new Class[]{byte[].class}, src);
+                if (msg == null) continue;
                 Object builder = call(msg, "toBuilder");
                 call(builder, "setMobiApp", MOBI_APP);
                 call(builder, "setBuild", Integer.valueOf(BUILD));
                 call(builder, "setChannel", CHANNEL);
+                if (!isMetadata) {
+                    call(builder, "setAppId", Integer.valueOf(APP_ID));
+                    call(builder, "setVersionName", VERSION_NAME);
+                }
                 Object built = call(builder, "build");
                 Object out = call(built, "toByteArray");
-                return out instanceof byte[] ? (byte[]) out : null;
-            } else {
-                Class<?> cls = loadQuiet("com.bapis.bilibili.metadata.device.Device");
-                if (cls == null) return null;
-                Object msg = invokeStatic(cls, "parseFrom", new Class[]{byte[].class}, src);
-                Object builder = call(msg, "toBuilder");
-                call(builder, "setMobiApp", MOBI_APP);
-                call(builder, "setBuild", Integer.valueOf(BUILD));
-                call(builder, "setChannel", CHANNEL);
-                call(builder, "setAppId", Integer.valueOf(APP_ID));
-                call(builder, "setVersionName", VERSION_NAME);
-                Object built = call(builder, "build");
-                Object out = call(built, "toByteArray");
-                return out instanceof byte[] ? (byte[]) out : null;
+                if (out instanceof byte[]) return (byte[]) out;
             }
         } catch (Throwable t) {
             api.warn("ip: protobuf rewrite: " + t);
-            return null;
+        }
+        return rewriteMobiAppBytes(src);
+    }
+
+    /** 6.4.0 空间页 REST 参数改写：空间身份走 URL 参数（mobi_app=android_i），
+     *  不走 moss/proto 头。挂空间页专属拦截器 e.addCommonParam（天然定域：只有空间请求经过它）。 */
+    private void installSpaceRestParams() {
+        String[] cand = {"com.bilibili.app.comm.list.common.api.e"};
+        for (final String cn : cand) {
+            try {
+                Class<?> c = api.load(cl, cn);
+                Method m = null;
+                for (Method mm : c.getDeclaredMethods()) {
+                    if (!mm.getName().equals("addCommonParam")) continue;
+                    Class<?>[] ps = mm.getParameterTypes();
+                    if (ps.length == 1 && java.util.Map.class.isAssignableFrom(ps[0])) { m = mm; break; }
+                }
+                if (m == null) {
+                    api.debug("ip: space rest params " + cn + ".addCommonParam not found");
+                    continue;
+                }
+                api.deoptimize(m);
+                api.addHook("ip: space rest params", m, new XposedInterface.Hooker() {
+                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        Object result = chain.proceed();
+                        if (!api.isIpLocationEnabled()) return result;
+                        try {
+                            Object mapObj = chain.getArg(0);
+                            if (mapObj instanceof java.util.Map) {
+                                java.util.Map<?, ?> map = (java.util.Map<?, ?>) mapObj;
+                                Object cur = map.get("mobi_app");
+                                if (cur != null && String.valueOf(cur).contains("android_i")) {
+                                    @SuppressWarnings("unchecked")
+                                    java.util.Map<Object, Object> raw = (java.util.Map<Object, Object>) mapObj;
+                                    raw.put("mobi_app", "android");
+                                    if (spaceParamFired.compareAndSet(false, true)) {
+                                        api.info("ip: space rest params rewritten mobi_app " + cur + " -> android");
+                                    }
+                                }
+                            }
+                        } catch (Throwable t0) {
+                            api.debug("ip: space rest params rewrite failed: " + t0);
+                        }
+                        return result;
+                    }
+                });
+                api.info("ip: space rest params hook ok -> " + cn + ".addCommonParam");
+            } catch (Throwable t) {
+                api.debug("ip: space rest params " + cn + " unavailable: " + t);
+            }
         }
     }
 
-    /** REST 评论/主页：按 URL 判定并改写 okhttp 请求参数。 */
+    /** 全量 Activity 探针：记录去重类名，定位用户真实打开的页面（cap 40）。 */
+    private void installActivityProbe() {
+        try {
+            final Class<?> act = api.load(cl, "android.app.Activity");
+            Method up = act.getDeclaredMethod("onResume");
+            api.deoptimize(up);
+            api.addHook("ip: activity probe", up, new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    try {
+                        Object thiz = chain.getThisObject();
+                        if (thiz != null) {
+                            String n = thiz.getClass().getName();
+                            if (seenActivities.size() < 40 && seenActivities.add(n)) {
+                                api.info("ip: activity: " + n);
+                            }
+                        }
+                    } catch (Throwable ignore0) { }
+                    return chain.proceed();
+                }
+            });
+            api.info("ip: activity probe ok");
+        } catch (Throwable t) {
+            api.debug("ip: activity probe unavailable: " + t);
+        }
+    }
+
+    /** 6.4.0 空间页 UI 定域：AuthorSpaceActivity 打开期间放行 kr1.a.a 改写（窗口制）。
+     *  6.4.0 空间 REST 由 kntr 直连 provider，svc 无法定位，只能按页面定位。 */
+    private void installSpaceUiScope() {
+        // 6.4.0 实测用户打开的空间页 = LocalAuthorSpaceActivity；AuthorSpaceActivity 为 6.3.0/遗留候选
+        String[] acts = {"com.bilibili.app.authorspace.local.LocalAuthorSpaceActivity",
+                "com.bilibili.app.authorspace.ui.AuthorSpaceActivity"};
+        for (final String actName : acts) {
+            try {
+                final Class<?> act = api.load(cl, actName);
+                Method up = null, down = null;
+                try { up = act.getDeclaredMethod("onResume"); } catch (Throwable ig1) { }
+                try { down = act.getDeclaredMethod("onPause"); } catch (Throwable ig2) { }
+                hookSpaceActivity(actName, act, up, down);
+            } catch (Throwable t) {
+                api.debug("ip: space ui scope " + actName + " unavailable: " + t);
+            }
+        }
+    }
+
+    private void hookSpaceActivity(final String actName, Class<?> act, Method up, Method down) {
+        try {
+            if (up != null) {
+                api.deoptimize(up);
+                api.addHook("ip: space page open", up, new XposedInterface.Hooker() {
+                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        if (sUiSpaceUntil == 0L) {
+                            api.info("ip: space page open -> identity armed (15s window)");
+                        }
+                        sUiSpaceUntil = System.currentTimeMillis() + 15000L;
+                        return chain.proceed();
+                    }
+                });
+                api.info("ip: space ui scope hook ok -> " + actName + ".onResume");
+            }
+            if (down != null) {
+                api.deoptimize(down);
+                api.addHook("ip: space page close", down, new XposedInterface.Hooker() {
+                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        if (sUiSpaceUntil != 0L) {
+                            api.info("ip: space page close -> identity disarmed");
+                        }
+                        sUiSpaceUntil = 0L;
+                        return chain.proceed();
+                    }
+                });
+            }
+        } catch (Throwable t) {
+            api.debug("ip: space ui scope " + actName + " hook failed: " + t);
+        }
+    }
+
+    /** 空间页传输通道探测：全局 OkHttpClient.newCall 抓 space 相关 URL（一次性/URL）。 */
+    private void installNewCallProbe() {
+        try {
+            final Class<?> client = api.load(cl, "okhttp3.OkHttpClient");
+            Method nc = null;
+            for (Method mm : client.getDeclaredMethods()) {
+                if (!mm.getName().equals("newCall")) continue;
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length == 1 && ps[0].getName().equals("okhttp3.Request")) { nc = mm; break; }
+            }
+            if (nc == null) {
+                api.debug("ip: OkHttpClient.newCall not found");
+                return;
+            }
+            final Method reqUrl = urlMethodOf(client);
+            api.deoptimize(nc);
+            api.addHook("ip: newcall probe", nc, new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    try {
+                        Object req = chain.getArg(0);
+                        if (req != null && reqUrl != null) {
+                            Object u = reqUrl.invoke(req);
+                            String us = u == null ? null : String.valueOf(u);
+                            if (us != null) {
+                                String low = us.toLowerCase();
+                                if (low.contains("space") && urlProbeSeen.add(low.substring(0, Math.min(120, low.length())))) {
+                                    api.info("ip: newcall url probe: " + us.substring(0, Math.min(160, us.length())));
+                                }
+                            }
+                        }
+                    } catch (Throwable ignore0) { }
+                    return chain.proceed();
+                }
+            });
+            api.info("ip: newcall probe ok");
+        } catch (Throwable t) {
+            api.debug("ip: newcall probe unavailable: " + t);
+        }
+    }
+
+    private Method urlMethodOf(Class<?> client) {
+        try {
+            Class<?> req = client.getClassLoader().loadClass("okhttp3.Request");
+            Class<?> hu = client.getClassLoader().loadClass("okhttp3.HttpUrl");
+            for (Method mm : req.getMethods()) {
+                if (mm.getParameterTypes().length == 0 && mm.getReturnType() == hu
+                        && (mm.getName().equals("Url") || mm.getName().equals("url"))) {
+                    mm.setAccessible(true);
+                    return mm;
+                }
+            }
+        } catch (Throwable ignore) { }
+        return null;
+    }
+
+    /** REST 评论/主页：按 URL 判定并改写 okhttp 请求参数。
+     *  6.3.0: Aq0.a.intercept；6.4.0: Aq0.a.intercept 消失，okhttp 拦截器迁到 Cq0.a。 */
     private void installRest() throws Throwable {
-        final Class<?> aq0a = api.load(cl, "Aq0.a");
+        installNewCallProbe();
+        installSpaceUiScope();
+        installActivityProbe();
+        installSpaceRestParams();
+        Class<?> aq0a = null;
+        String restClsUsed = null;
+        for (String cn : new String[]{"Aq0.a", "Cq0.a"}) {
+            try {
+                Class<?> c = api.load(cl, cn);
+                boolean has = false;
+                for (Method mm : c.getDeclaredMethods()) {
+                    if (mm.getName().equals("intercept") && mm.getParameterTypes().length == 1) { has = true; break; }
+                }
+                if (has) { aq0a = c; restClsUsed = cn; break; }
+            } catch (Throwable next) {
+                // 下一候选
+            }
+        }
+        if (aq0a == null) {
+            api.warn("ip: rest interceptor (Aq0.a/Cq0.a) not present; skip");
+            return;
+        }
+        final String restCls = restClsUsed;
         Method m = null;
         for (Method mm : aq0a.getDeclaredMethods()) {
             if (mm.getName().equals("intercept") && mm.getParameterTypes().length == 1) {
                 m = mm;
                 break;
             }
-        }
-        if (m == null) {
-            api.warn("ip: Aq0.a.intercept not found");
-            return;
         }
         api.deoptimize(m);
         final Class<?> chainCls = m.getParameterTypes()[0];
@@ -550,8 +850,15 @@ public final class IpLocationHooks {
                 Object chainObj = chain.getArg(0);
                 Object req = reqMethod != null ? api.invoke(reqMethod, chainObj) : null;
                 String url = urlString(urlMethod, req);
+                if (url != null) {
+                    String low = url.toLowerCase();
+                    if ((low.contains("space") || low.contains("feed") || low.contains("region"))
+                            && urlProbeSeen.add(low.substring(0, Math.min(120, low.length())))) {
+                        api.info("ip: rest url probe: " + url.substring(0, Math.min(160, url.length())));
+                    }
+                }
                 if (api.isVerboseLoggingEnabled()) {
-                    api.info("ip: Aq0.a intercept url=" + url);
+                    api.info("ip: rest intercept url=" + url);
                 }
                 String kind = classifyRest(url);
                 if (kind == null) return chain.proceed();
@@ -572,7 +879,7 @@ public final class IpLocationHooks {
                 }
             }
         });
-        api.info("ip: rest interceptor hook ok -> Aq0.a.intercept");
+        api.info("ip: rest interceptor hook ok -> " + restCls + ".intercept");
     }
 
     /** REST 公共参数注入点：XA0.a 是 okretro 所有参数拦截器的基类。
@@ -581,6 +888,11 @@ public final class IpLocationHooks {
      *  hook addCommonParam 按 URL 判定主页/评论并改写 map。
      *  主页 -> android（国内版普通），评论 -> android_hd。 */
     private void installRestParams() {
+        if (restParamsAttempts.incrementAndGet() > MAX_RETRY) {
+            // 6.4.0 okretro 参数基类移除；REST 公共参数路径已由 Cq0.a 拦截器覆盖
+            api.warn("ip: rest params (XA0.a) not present in this version; give up");
+            return;
+        }
         try {
             final Class<?> xa0 = api.load(cl, "XA0.a");
             // addCommonParamToUrl(t, z.a)：记录 URL
@@ -674,6 +986,18 @@ public final class IpLocationHooks {
         } catch (Throwable t) {
             api.error("ip: rest params hook failed", t);
         }
+    }
+
+    /** 字节流内查找子串，返回下标（无则 -1）。 */
+    private static int indexOfBytes(byte[] hay, String needle) {
+        byte[] n = needle.getBytes();
+        outer: for (int i = 0; i <= hay.length - n.length; i++) {
+            for (int j = 0; j < n.length; j++) {
+                if (hay[i + j] != n[j]) continue outer;
+            }
+            return i;
+        }
+        return -1;
     }
 
     /** 在 protobuf 字节流中把 android_i 替换为 android_hd。
