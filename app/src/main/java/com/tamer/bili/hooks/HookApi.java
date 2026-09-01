@@ -46,6 +46,9 @@ public interface HookApi {
 
     int getCodecMode();
 
+    /** 自动顺位下是否按设备硬解能力过滤 HEVC/AV1（默认开，v1.6.1 黑屏修复）。 */
+    boolean isCodecHwFilterEnabled();
+
     int getAudioQuality();
 
     int getHdrMode();

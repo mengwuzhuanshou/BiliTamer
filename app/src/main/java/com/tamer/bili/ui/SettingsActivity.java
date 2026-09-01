@@ -83,6 +83,10 @@ public class SettingsActivity extends Activity {
                 new int[]{0, 1, 2},
                 "顺位：优先 AV1，服务端没有 AV1 就 HEVC，都没有才用 H264；\n"
                 + "锁定：只使用指定编码（该编码不可用时回退到默认 H264）");
+        addSwitch(BiliConfig.KEY_CODEC_HW_FILTER, "按硬解能力自动过滤 HEVC/AV1", "HW-decode auto filter",
+                "自动顺位下，设备没有硬件解码器的编码不再向服务端请求，\n"
+                + "规避软解失败导致的随机黑屏（有声无画面）。\n"
+                + "锁定 HEVC/AV1 不受此开关影响；改后需强停 B 站重开");
         addRadio(BiliConfig.KEY_AUDIO_QUALITY, "音质选项", "Audio quality",
                 new String[]{"顺位 Auto (杜比>无损>AAC)", "锁定 AAC", "锁定杜比全景声", "锁定 Hi-Res 无损"},
                 new int[]{0, 1, 2, 3},

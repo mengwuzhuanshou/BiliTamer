@@ -9,6 +9,11 @@ import io.github.libxposed.api.XposedInterface;
 /**
  * 播放器解码（HEVC / AV1）与音质（Hi-Res 无损 / 杜比全景声 / AAC）选择。
  *
+ * 解码自动顺位按设备硬解能力过滤<b>请求位</b>（CodecCapability，v1.6.1 黑屏修复）：
+ * 设备没有硬件解码器的编码不写入 fnval，服务端即不下发对应流。**只过滤请求，
+ * 不替换解码**——自动时的顺位选择仍完全交给原逻辑在实发流集合上自行回退，
+ * 锁定项是用户显式选择也不过滤（仅告警）。
+ *
  * 6.3.0 落点：
  *  - fnval 位控制服务端下发哪些格式的流。hook FG1.b 的 fnval 计算（int c() 与 long d()）
  *    按设置强制开启对应位，服务端才会下发 HEVC/AV1/Dolby 流。
@@ -36,6 +41,9 @@ public final class PlayerCodecHooks {
     private final HookApi api;
     private final ClassLoader cl;
     private final java.util.concurrent.atomic.AtomicBoolean probeFnval =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    /** 设备硬解能力只打一条日志（进程生命周期内去重）。 */
+    private final java.util.concurrent.atomic.AtomicBoolean hwCapLogged =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public PlayerCodecHooks(HookApi api, ClassLoader cl) {
@@ -144,7 +152,7 @@ public final class PlayerCodecHooks {
         api.info("codec: fnval hook ok -> " + fnvalClsUsed + ".c()/d()");
     }
 
-    /** 自动顺位：AV1 > HEVC；锁定：只开对应位。 */
+    /** 自动顺位：仅请求设备能硬解的编码位（都无硬解=仅 H264，不替换解码）；锁定：只开对应位。 */
     private int applyFnvalBits(int v) {
         int nv = v | FNVAL_DASH;
         int codec = api.getCodecMode();
@@ -160,14 +168,24 @@ public final class PlayerCodecHooks {
             nv &= ~(FNVAL_HDR | FNVAL_HDR_VIVID);
         }
         switch (codec) {
-            case 1: // 锁定 HEVC
+            case 1: // 锁定 HEVC（用户显式选择，不过滤，只提示风险）
+                warnLockedNoHwOnce("HEVC", CodecCapability.hwHevc());
                 nv |= FNVAL_H265;
                 break;
             case 2: // 锁定 AV1
+                warnLockedNoHwOnce("AV1", CodecCapability.hwAv1());
                 nv |= FNVAL_AV1;
                 break;
-            default: // 自动顺位：AV1 优先，其次 HEVC（两者都开，由服务端回退）
-                nv |= FNVAL_AV1 | FNVAL_H265;
+            default: // 自动顺位：无硬解的编码不向服务端请求（黑屏修复 v1.6.1）
+                boolean hevcHw = CodecCapability.hwHevc();
+                boolean av1Hw = CodecCapability.hwAv1();
+                logHwCapOnce(hevcHw, av1Hw);
+                if (api.isCodecHwFilterEnabled()) {
+                    if (av1Hw) nv |= FNVAL_AV1;
+                    if (hevcHw) nv |= FNVAL_H265;
+                } else {
+                    nv |= FNVAL_AV1 | FNVAL_H265;
+                }
                 break;
         }
         switch (audio) {
@@ -187,9 +205,20 @@ public final class PlayerCodecHooks {
     private long applySoftFnvalBits(long v) {
         long nv = v;
         int codec = api.getCodecMode();
-        if (codec == 1) nv |= FNVAL_H265;
-        if (codec == 2) nv |= FNVAL_AV1;
-        if (codec == 0) nv |= FNVAL_AV1 | FNVAL_H265;
+        if (codec == 1) {
+            nv |= FNVAL_H265;
+            return nv;
+        }
+        if (codec == 2) {
+            nv |= FNVAL_AV1;
+            return nv;
+        }
+        if (!api.isCodecHwFilterEnabled()) {
+            nv |= FNVAL_AV1 | FNVAL_H265;
+            return nv;
+        }
+        if (CodecCapability.hwAv1()) nv |= FNVAL_AV1;
+        if (CodecCapability.hwHevc()) nv |= FNVAL_H265;
         return nv;
     }
 
@@ -207,7 +236,7 @@ public final class PlayerCodecHooks {
         api.addHook("codec: preference", c, new XposedInterface.Hooker() {
             @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                 int codec = api.getCodecMode();
-                if (codec == 0) return chain.proceed(); // 自动：交给原逻辑
+                if (codec == 0) return chain.proceed(); // 自动：交给原逻辑（硬解过滤只在请求位做，不替换解码）
                 Object thiz = chain.getThisObject();
                 if (thiz == null) return chain.proceed();
                 Object cur = yField.get(thiz);
@@ -227,6 +256,23 @@ public final class PlayerCodecHooks {
             }
         });
         api.info("codec: codec preference hook ok -> GeminiCommonResolverParams.c()");
+    }
+
+    private void logHwCapOnce(boolean hevcHw, boolean av1Hw) {
+        if (hwCapLogged.compareAndSet(false, true)) {
+            api.info("codec: hw decode capability hevc=" + hevcHw + " av1=" + av1Hw
+                    + " filter=" + api.isCodecHwFilterEnabled()
+                    + " -> auto allows: " + (av1Hw ? "AV1 " : "")
+                    + (hevcHw ? "HEVC" : (av1Hw ? "" : "none (H264 only)")));
+        }
+    }
+
+    private void warnLockedNoHwOnce(String name, boolean hwOk) {
+        if (!hwOk && hwCapLogged.compareAndSet(false, true)) {
+            api.warn("codec: device has no " + name
+                    + " hw decoder but codec is LOCKED to it — software-decode/black-screen"
+                    + " risk (explicit user override, not filtered)");
+        }
     }
 
     /** hook MediaResource.I(int,int)：默认音轨顺位 杜比 > Hi-Res > AAC。 */

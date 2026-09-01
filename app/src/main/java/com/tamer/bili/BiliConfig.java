@@ -34,6 +34,9 @@ public final class BiliConfig {
     // ===== 播放器解码：0=自动 1=HEVC 2=AV1 =====
     public static final String KEY_CODEC = "codec_mode";
 
+    // ===== 播放器硬解过滤：自动顺位下按设备硬解能力过滤 HEVC/AV1（默认开）=====
+    public static final String KEY_CODEC_HW_FILTER = "codec_hw_filter";
+
     // ===== 音质：0=默认 1=AAC 2=杜比全景声 3=Hi-Res 无损 =====
     public static final String KEY_AUDIO_QUALITY = "audio_quality";
 
@@ -63,6 +66,7 @@ public final class BiliConfig {
         KEY_IP_LOCATION,
         KEY_IP_SCOPE,
         KEY_CODEC,
+        KEY_CODEC_HW_FILTER,
         KEY_AUDIO_QUALITY,
         KEY_HDR,
         KEY_LISTEN_PAUSE_AFTER_END,
@@ -79,6 +83,7 @@ public final class BiliConfig {
     public static boolean defaultValueOf(String key) {
         if (KEY_MASTER.equals(key)) return true;
         if (KEY_IP_LOCATION.equals(key)) return true;   // v1.1 起出厂默认开
+        if (KEY_CODEC_HW_FILTER.equals(key)) return true; // v1.6.1 起出厂默认开（黑屏修复）
         if (KEY_HIDE_TRIPLE.equals(key)) return false;
         if (KEY_HIDE_VOTE.equals(key)) return false;
         if (KEY_HIDE_UP_PROMPT.equals(key)) return false;

@@ -291,3 +291,25 @@ string_ids(56/60)、type_ids(64/68)、proto_ids(72/76)、field_ids(80/84)、
 method_ids(88/92)、class_defs(96/100)；uleb128 读字符串；field_id 的类型在
 偏移 +2（u16），别把声明类（+0）当字段类型读。工作区 `common/recon/` 有通用
 扫描脚本（dexscan.py：全 dex 类枚举/前缀过滤/单类签名转储/字符串池检索）。
+
+## 20. 解码黑屏修复：按硬解能力过滤请求位，但不替换解码偏好（v1.6.1）
+
+* **现象**：分发反馈播放随机黑屏只有声音。根因：自动顺位下模块无条件把
+  `FNVAL_AV1|FNVAL_H265` OR 进 fnval，服务端于是下发 AV1/HEVC 流；设备没有对应
+  硬解时播放器软解/解码失败，音频轨正常走、画面黑。“随机”来自不同视频下发编码
+  不同。模块此前只做了“服务端有什么”的顺位，没做“设备能解什么”的过滤。
+* **做法（CodecCapability）**：反射遍历 `MediaCodecList(REGULAR_CODECS)` 找目标
+  mime（HEVC=video/hevc，AV1=video/av01）的硬解：API 29+ 读
+  `isHardwareAccelerated()`，更老设备回退名字启发（`omx.google.`/`c2.android.`/
+  `c2.google.`/含 `.sw.` 为软解）。探测异常 fail-open 按支持处理；结果进程内缓存。
+  自动顺位：无硬解的编码不写请求位——服务端不下发，原逻辑自然回退（AVC 恒在）。
+  锁定模式不过滤，只告警一次（用户显式选择）。
+* **设计约束（用户明确要求）：只过滤请求，不替换解码。** 不要在解码偏好落点
+  （GeminiCommonResolverParams.c()）把选中的 HEVC/AV1 改写成 H264——“过滤掉不能
+  硬解的”是删除请求位，让服务端少下发，选择权仍在原逻辑；“压回 H264”是主动指定
+  另一种编码，会覆盖原逻辑在真实交付流集合上的选择（质量/回退语义都可能被改）。
+  两者不是一回事。
+* **坑**：软解 AV1（c2.android.av1.decoder，dav1d）在 MediaCodecList 里存在且可查询，
+  名字启发必须把它排掉，否则过滤形同虚设；`MediaCodecInfo
+  .isHardwareAccelerated()` API 29 才转公，低版本直调 NoSuchMethodError——反射 +
+  名字回退。整体用反射还有一层原因：编译桩（build-stub）不含 android.media。

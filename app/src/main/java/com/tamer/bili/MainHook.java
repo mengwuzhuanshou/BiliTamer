@@ -95,6 +95,7 @@ public class MainHook extends XposedModule implements HookApi {
                     + " ip=" + isIpLocationEnabled()
                     + " ipScope=" + getIpScopeMode()
                     + " codec=" + getCodecMode()
+                    + " codecHwFilter=" + isCodecHwFilterEnabled()
                     + " audio=" + getAudioQuality()
                     + " hdr=" + getHdrMode()
                     + " listenPause=" + isListenPauseEnabled()
@@ -260,6 +261,13 @@ public class MainHook extends XposedModule implements HookApi {
     public int getCodecMode() {
         BiliConfig c = config;
         return c == null ? 0 : c.getInt(BiliConfig.KEY_CODEC, 0);
+    }
+
+    @Override
+    public boolean isCodecHwFilterEnabled() {
+        BiliConfig c = config;
+        return c == null || c.get(BiliConfig.KEY_CODEC_HW_FILTER,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_CODEC_HW_FILTER));
     }
 
     @Override
