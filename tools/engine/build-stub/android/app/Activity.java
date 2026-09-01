@@ -12,4 +12,5 @@ public class Activity extends Context {
     public void finish() { }
     public Intent getIntent() { return null; }
     public Resources getResources() { return null; }
+    public void startActivity(Intent intent) { }
 }

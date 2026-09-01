@@ -87,6 +87,22 @@ public class SettingsActivity extends Activity {
                 "自动顺位下，设备没有硬件解码器的编码不再向服务端请求，\n"
                 + "规避软解失败导致的随机黑屏（有声无画面）。\n"
                 + "锁定 HEVC/AV1 不受此开关影响；改后需强停 B 站重开");
+
+        section("首页布局（国内版风格）", "Home layout (CN-style)");
+        addSwitch(BiliConfig.KEY_HOME_TOPBAR_MSG_ICON, "顶栏搜索栏右侧加「消息」图标", "Topbar message icon",
+                "对齐国内版布局：搜索框右侧留白处加消息图标，点击直达消息页。\n"
+                + "国际版搜索区右侧本就留白，不影响搜索框点击。仅适配 6.4.0");
+        addSwitch(BiliConfig.KEY_HOME_TOPBAR_MSG_BADGE, "顶栏「消息」图标显示未读角标", "Topbar message badge",
+                "消息图标右上角显示未读红点带数字（与消息 tab 角标同源），无未读时\n"
+                + "隐藏。需开启「顶栏消息图标」；改后需强停 B 站重开");
+        addSwitch(BiliConfig.KEY_HOME_AVATAR_MINE_ENTRY, "顶栏头像作为「我的」入口", "Avatar as Mine entry",
+                "国际版顶栏头像原本无点击行为，开启后点击头像直达「我的」页面。仅适配 6.4.0");
+        addSwitch(BiliConfig.KEY_HOME_TABBAR_RM_MSG, "底栏移除「消息」tab（实验）", "Remove message tab (beta)",
+                "消息入口已上移到顶栏时移除底栏对应 tab。实验性：部分版本底栏\n"
+                + "为 Compose 直出，可能不生效；改后需强停 B 站重开");
+        addSwitch(BiliConfig.KEY_HOME_TABBAR_RM_MINE, "底栏移除「我的」tab（实验）", "Remove mine tab (beta)",
+                "「我的」入口已上移到顶栏头像时移除底栏对应 tab。实验性：移除后\n"
+                + "头像点击将退化为深链打开（页面不完整），故默认关闭；改后需强停");
         addRadio(BiliConfig.KEY_AUDIO_QUALITY, "音质选项", "Audio quality",
                 new String[]{"顺位 Auto (杜比>无损>AAC)", "锁定 AAC", "锁定杜比全景声", "锁定 Hi-Res 无损"},
                 new int[]{0, 1, 2, 3},

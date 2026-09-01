@@ -13,6 +13,9 @@ public interface HookApi {
 
     void addHook(String name, Method method, XposedInterface.Hooker hooker);
 
+    /** 构造器 hook（目标类未覆写目标方法时的兜底，如 HomeAppBarLayout 顶栏注入）。 */
+    void addHookCtor(String name, java.lang.reflect.Constructor<?> ctor, XposedInterface.Hooker hooker);
+
     void debug(String msg);
 
     void info(String msg);
@@ -52,6 +55,21 @@ public interface HookApi {
     int getAudioQuality();
 
     int getHdrMode();
+
+    /** 顶栏搜索栏右侧加「消息」图标（默认开，6.4.0 锚点）。 */
+    boolean isHomeTopbarMessageIcon();
+
+    /** 顶栏消息图标未读角标（红点带数字）。 */
+    boolean isHomeTopbarMessageBadge();
+
+    /** 顶栏左侧头像作为「我的」入口（默认开，6.4.0 锚点）。 */
+    boolean isHomeAvatarMineEntry();
+
+    /** 底栏移除「消息」tab（默认开，6.4.0 锚点）。 */
+    boolean isHomeTabbarRemoveMessage();
+
+    /** 底栏移除「我的」tab（默认开，6.4.0 锚点）。 */
+    boolean isHomeTabbarRemoveMine();
 
     boolean isListenPauseEnabled();
 

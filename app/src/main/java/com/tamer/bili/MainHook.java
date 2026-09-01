@@ -5,6 +5,7 @@ import android.os.Looper;
 import android.util.Log;
 
 import com.tamer.bili.hooks.HomeNoAutoRefreshHooks;
+import com.tamer.bili.hooks.HomeUxHooks;
 import com.tamer.bili.hooks.HookApi;
 import com.tamer.bili.hooks.InteractHintHooks;
 import com.tamer.bili.hooks.IpLocationHooks;
@@ -120,6 +121,11 @@ public class MainHook extends XposedModule implements HookApi {
                 new PlayerCodecHooks(MainHook.this, cl).install();
             }
         });
+        install("HomeUxHooks", new ThrowingAction() {
+            @Override public void run() throws Throwable {
+                new HomeUxHooks(MainHook.this, cl).install();
+            }
+        });
         if (main) {
             install("ListenPauseHooks", new ThrowingAction() {
                 @Override public void run() throws Throwable {
@@ -166,6 +172,15 @@ public class MainHook extends XposedModule implements HookApi {
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(hooker));
         info("hook installed: " + name + " -> " + method);
+    }
+
+    @Override
+    public void addHookCtor(String name, java.lang.reflect.Constructor<?> ctor, XposedInterface.Hooker hooker) {
+        hookHandles.add(hook((java.lang.reflect.Executable) ctor)
+                .setPriority(Integer.MAX_VALUE)
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(hooker));
+        info("hook installed: " + name + " -> " + ctor);
     }
 
     @Override
@@ -280,6 +295,41 @@ public class MainHook extends XposedModule implements HookApi {
     public int getHdrMode() {
         BiliConfig c = config;
         return c == null ? 0 : c.getInt(BiliConfig.KEY_HDR, 0);
+    }
+
+    @Override
+    public boolean isHomeTopbarMessageIcon() {
+        BiliConfig c = config;
+        return c == null || c.get(BiliConfig.KEY_HOME_TOPBAR_MSG_ICON,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_HOME_TOPBAR_MSG_ICON));
+    }
+
+    @Override
+    public boolean isHomeTopbarMessageBadge() {
+        BiliConfig c = config;
+        return c == null || c.get(BiliConfig.KEY_HOME_TOPBAR_MSG_BADGE,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_HOME_TOPBAR_MSG_BADGE));
+    }
+
+    @Override
+    public boolean isHomeAvatarMineEntry() {
+        BiliConfig c = config;
+        return c == null || c.get(BiliConfig.KEY_HOME_AVATAR_MINE_ENTRY,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_HOME_AVATAR_MINE_ENTRY));
+    }
+
+    @Override
+    public boolean isHomeTabbarRemoveMessage() {
+        BiliConfig c = config;
+        return c == null || c.get(BiliConfig.KEY_HOME_TABBAR_RM_MSG,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_HOME_TABBAR_RM_MSG));
+    }
+
+    @Override
+    public boolean isHomeTabbarRemoveMine() {
+        BiliConfig c = config;
+        return c == null || c.get(BiliConfig.KEY_HOME_TABBAR_RM_MINE,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_HOME_TABBAR_RM_MINE));
     }
 
     @Override

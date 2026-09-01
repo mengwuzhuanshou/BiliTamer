@@ -37,6 +37,13 @@ public final class BiliConfig {
     // ===== 播放器硬解过滤：自动顺位下按设备硬解能力过滤 HEVC/AV1（默认开）=====
     public static final String KEY_CODEC_HW_FILTER = "codec_hw_filter";
 
+    // ===== 首页 UI 布局（国内版风格）：顶栏消息图标 / 头像=我的入口 / 底栏删 tab =====
+    public static final String KEY_HOME_TOPBAR_MSG_ICON = "home_topbar_message_icon";
+    public static final String KEY_HOME_AVATAR_MINE_ENTRY = "home_avatar_mine_entry";
+    public static final String KEY_HOME_TABBAR_RM_MSG = "home_tabbar_remove_message";
+    public static final String KEY_HOME_TABBAR_RM_MINE = "home_tabbar_remove_mine";
+    public static final String KEY_HOME_TOPBAR_MSG_BADGE = "home_topbar_message_badge";
+
     // ===== 音质：0=默认 1=AAC 2=杜比全景声 3=Hi-Res 无损 =====
     public static final String KEY_AUDIO_QUALITY = "audio_quality";
 
@@ -69,6 +76,11 @@ public final class BiliConfig {
         KEY_CODEC_HW_FILTER,
         KEY_AUDIO_QUALITY,
         KEY_HDR,
+        KEY_HOME_TOPBAR_MSG_ICON,
+        KEY_HOME_TOPBAR_MSG_BADGE,
+        KEY_HOME_AVATAR_MINE_ENTRY,
+        KEY_HOME_TABBAR_RM_MSG,
+        KEY_HOME_TABBAR_RM_MINE,
         KEY_LISTEN_PAUSE_AFTER_END,
         KEY_HIDE_TRIPLE,
         KEY_HIDE_VOTE,
@@ -84,6 +96,11 @@ public final class BiliConfig {
         if (KEY_MASTER.equals(key)) return true;
         if (KEY_IP_LOCATION.equals(key)) return true;   // v1.1 起出厂默认开
         if (KEY_CODEC_HW_FILTER.equals(key)) return true; // v1.6.1 起出厂默认开（黑屏修复）
+        if (KEY_HOME_TOPBAR_MSG_ICON.equals(key)) return true;   // v1.7.0 首页布局（6.4.0）
+        if (KEY_HOME_TOPBAR_MSG_BADGE.equals(key)) return true;  // v1.7.0 顶栏消息未读角标
+        if (KEY_HOME_AVATAR_MINE_ENTRY.equals(key)) return true; // v1.7.0 首页布局（6.4.0）
+        if (KEY_HOME_TABBAR_RM_MSG.equals(key)) return true;     // v1.7.0 底栏删消息 tab（顶栏消息入口替代）
+        if (KEY_HOME_TABBAR_RM_MINE.equals(key)) return false;   // v1.7.0 默认保留「我的」tab（顶栏头像点击需要落点；移除后深链页不完整）
         if (KEY_HIDE_TRIPLE.equals(key)) return false;
         if (KEY_HIDE_VOTE.equals(key)) return false;
         if (KEY_HIDE_UP_PROMPT.equals(key)) return false;
