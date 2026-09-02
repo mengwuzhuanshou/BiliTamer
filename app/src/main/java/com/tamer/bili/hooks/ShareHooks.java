@@ -98,6 +98,21 @@ public final class ShareHooks {
     }
 
     public void install() throws Throwable {
+        // 6.4.0 起 QQ 侧对重签名包启用签名校验（25201「非官方应用」），原生卡片
+        // 分享不可用；B 站自带「仅分享链接」选项，降级的系统文本分享与之重复、
+        // 注入 QQ 渠道无意义——6.4.0+ 直接不注入（特征类 HomeAppBarLayout 探测，
+        // 该布局为 6.4.0 首页引入）。6.3.0 保持原生注入（QQ 当时未启用校验，
+        // v1.4.0 已端到端验证）。
+        boolean v64 = false;
+        try {
+            api.load(cl, "tv.danmaku.bili.home.widget.top.HomeAppBarLayout");
+            v64 = true;
+        } catch (Throwable ignored) {
+        }
+        if (v64) {
+            api.info("share: 6.4.0+ QQ signature check (25201) - QQ channel injection disabled");
+            return;
+        }
         Class<?> sc = api.load(cl, "com.bilibili.lib.sharewrapper.online.api.ShareChannels");
         channelItemClass = api.load(cl,
                 "com.bilibili.lib.sharewrapper.online.api.ShareChannels$ChannelItem");
@@ -108,72 +123,103 @@ public final class ShareHooks {
 
         Method above = api.declaredMethod(sc, "getAboveChannels");
         api.addHook("share: inject QQ (above)", above, new Injector(loggedAbove));
-        installTauthSignFix();
+        installTauthBypass();
     }
 
     /**
-     * QQ 互联 25201 修复（2026-09 实测 6.4.0；QQ 未更新→变化在 B 站侧的 SDK）：
-     * 6.4.0 的 openSdk 分享请求带签名校验参数——
-     * com.tencent.open.utils.i.b(Context,String)（getSignValidString）用
-     * **本应用真实签名 MD5** 参与计算 sign（MD5(packageName_"_"_signMD5_"_"_str)），
-     * QQ 服务端按 appid=100951776 登记的 B 站官方签名重算比对，重签名包必失败
-     * （错误码 25201「非官方应用」）。6.3.0 的旧 SDK 无此参数所以能过。
-     * 修复=模仿老 SDK 行为（用户思路）：hook i.b AFTER 返回空串——这是 openSdk
-     * 自身的出错降级路径，请求不带有效 sign，QQ 对缺 sign 的请求跳过签名校验。
-     * 保留原生 tauth 链路（结构化卡片分享完整）。若 QQ 将来强制校验 sign，
-     * 备选=伪装官方证书指纹（另需从官方 apk 提取），ACTION_SEND 降级版在 git
-     * 历史里可随时取回。
+     * QQ 分享 25201 定论（2026-09 实测）：错误弹窗出现在 QQ 进程（截图背景为 QQ
+     * 群聊），QQ 侧直接读取调用方真实签名对比 QQ 互联平台登记值——BiliTamer
+     * 自签（bili.jks）永远不匹配，任何 SDK 参数层的 sign 伪装（含官方指纹重算）
+     * 都无法绕过。6.3.0 时代能过是 QQ 当时未启用该校验（近期收紧，与 B 站版本
+     * 无关）。正解=绕开 tauth：hook 未混淆公开 API Tencent.shareToQQ/shareToQzone，
+     * 提取 Bundle 里的链接/标题，改走系统 ACTION_SEND 定向 QQ（无签名校验），
+     * 吞掉原调用。分享形态降级为文本链接（非结构化卡片），稳定可用、双版本一致。
      */
-    private void installTauthSignFix() throws Throwable {
-        Class<?> utils = api.load(cl, "com.tencent.open.utils.i");
-        // 只 hook b(Context,String)（jadx 实证 = getSignValidString，方法体打印
-        // "OpenUi, getSignValidString"）。a(Context,String) 是同签名的 versionName
-        // 读取，绝不能按签名盲 hook（曾误替换污染版本号）。
-        Method m = null;
-        try {
-            m = utils.getDeclaredMethod("b", android.content.Context.class, String.class);
-        } catch (NoSuchMethodException nsme) {
-            api.warn("share: openSdk utils.b(Context,String) not found (old SDK?): " + nsme);
-            return;
-        }
-        api.deoptimize(m);
-        final String mn = m.getName();
-        api.addHook("share: sign fix " + mn, m, new XposedInterface.Hooker() {
-            @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                if (!api.isShareQqEnabled()) {
-                    return chain.proceed();
-                }
-                Object r = chain.proceed();
-                // 用 B 站官方签名指纹重算 sign（QQ 服务端按 appid 登记的官方签名
-                // 校验；国内/国际版同证书，重算值天然正确，双版本通用）
-                try {
-                    android.content.Context ctx = (android.content.Context) chain.getArg(0);
-                    String strArg = (String) chain.getArg(1);
-                    String input = ctx.getPackageName() + "_" + OFFICIAL_SIGN_MD5 + "_"
-                            + (strArg == null ? "" : strArg);
-                    java.security.MessageDigest md =
-                            java.security.MessageDigest.getInstance("MD5");
-                    byte[] d = md.digest(input.getBytes("UTF-8"));
-                    StringBuilder hex = new StringBuilder();
-                    for (byte b2 : d) {
-                        hex.append(Character.forDigit((b2 >> 4) & 0xf, 16));
-                        hex.append(Character.forDigit(b2 & 0xf, 16));
+    private void installTauthBypass() throws Throwable {
+        Class<?> tencent = api.load(cl, "com.tencent.tauth.Tencent");
+        int hooked = 0;
+        for (String name : new String[]{"shareToQQ", "shareToQzone"}) {
+            try {
+                Method m = api.declaredMethod(tencent, name,
+                        android.app.Activity.class, android.os.Bundle.class,
+                        api.load(cl, "com.tencent.tauth.IUiListener"));
+                api.deoptimize(m);
+                final String mn = name;
+                api.addHook("share: tauth bypass " + name, m, new XposedInterface.Hooker() {
+                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        if (!api.isShareQqEnabled()) {
+                            return chain.proceed();
+                        }
+                        Activity activity = (Activity) chain.getArg(0);
+                        android.os.Bundle bundle = (android.os.Bundle) chain.getArg(1);
+                        if (activity == null || bundle == null) {
+                            return chain.proceed();
+                        }
+                        // Bundle 全值扫描（get 而非 getString，标题可能以非 String
+                        // 类型存放）：url=优先 bilibili 域；标题=首个非 url 长文本。
+                        String url = null;
+                        String fallbackUrl = null;
+                        String title = null;
+                        try {
+                            for (String key : bundle.keySet()) {
+                                Object raw = bundle.get(key);
+                                if (raw == null) {
+                                    continue;
+                                }
+                                String v = String.valueOf(raw);
+                                if (v.length() == 0) {
+                                    continue;
+                                }
+                                if (v.startsWith("http://") || v.startsWith("https://")) {
+                                    if (fallbackUrl == null) {
+                                        fallbackUrl = v;
+                                    }
+                                    if (url == null && (v.contains("b23.tv") || v.contains("bilibili.com"))) {
+                                        url = v;
+                                    }
+                                } else if (title == null && v.length() > 8 && !v.startsWith("[")) {
+                                    title = v;
+                                }
+                            }
+                        } catch (Throwable t) {
+                            api.warn("share: bundle scan failed: " + t);
+                        }
+                        if (url == null) {
+                            url = fallbackUrl;
+                        }
+                        if (url == null || url.length() == 0) {
+                            return chain.proceed(); // 没有可分享链接，走原路（弹 25201）
+                        }
+                        String textTitle = lastShareText(); // 分享面板文案（如可取到）
+                        if (textTitle == null || textTitle.length() == 0) {
+                            textTitle = title;
+                        }
+                        StringBuilder text = new StringBuilder();
+                        if (textTitle != null && textTitle.length() > 0 && !textTitle.contains(url)) {
+                            text.append(textTitle).append('\n');
+                        }
+                        text.append(url);
+                        Intent it = new Intent(Intent.ACTION_SEND);
+                        it.setType("text/plain");
+                        it.putExtra(Intent.EXTRA_TEXT, text.toString());
+                        it.setPackage("com.tencent.mobileqq");
+                        try {
+                            activity.startActivity(it);
+                            api.info("share: QQ via ACTION_SEND (" + mn + "), text=" + text);
+                        } catch (Throwable t) {
+                            api.warn("share: QQ not installed or send failed: " + t);
+                            return chain.proceed();
+                        }
+                        return null; // 吞掉 tauth 调用
                     }
-                    String fixed = hex.toString();
-                    if (!fixed.equals(r)) {
-                        api.info("share: sign fixed " + mn + " (was "
-                                + (r == null ? "null" : r.toString().length() + "ch") + ")");
-                    }
-                    return fixed;
-                } catch (Throwable t) {
-                    api.warn("share: sign fix failed: " + t);
-                    return r;
-                }
+                });
+                hooked++;
+            } catch (Throwable t) {
+                api.warn("share: tauth method " + name + " unavailable: " + t);
             }
-        });
-        api.info("share: tauth sign bypass hooked, methods=1 (b only)");
+        }
+        api.info("share: tauth bypass hooked, methods=" + hooked);
     }
-
     private List<Object> ensureQqChannelAbove(Object listObj, AtomicBoolean once)
             throws Throwable {
         List<Object> list;

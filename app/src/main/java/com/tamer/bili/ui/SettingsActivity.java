@@ -121,8 +121,9 @@ public class SettingsActivity extends Activity {
 
                 section("分享", "Share");
         addSwitch(BiliConfig.KEY_SHARE_QQ, "分享面板添加「分享到 QQ」", "Add Share-to-QQ entry",
-                "国际版分享面板默认没有 QQ 入口；开启后补回该渠道，点击走 B 站自带\n"
-                + "的 QQ 互联分享链路（弹出 QQ 分享面板选好友/群）。需已安装手机 QQ；\n"
+                "原生卡片分享仅 6.3.0 时代可用（QQ 当时未启用签名校验）；\n"
+                + "6.4.0 起 QQ 侧对重签名包直接弹「非官方应用 25201」且自带\n"
+                + "「仅分享链接」选项，注入无意义——本开关在 6.4.0 上不生效。\n"
                 + "改后需强制停止 B 站重开");
 
         section("隐藏互动提示", "Hide in-video prompts");
