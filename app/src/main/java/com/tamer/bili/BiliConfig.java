@@ -62,11 +62,15 @@ public final class BiliConfig {
     public static final String KEY_NO_AUTO_REFRESH = "no_auto_refresh";
     public static final String KEY_SHARE_QQ = "share_qq";           // 分享面板补回分享到 QQ
 
+    // ===== 首页推荐分区屏蔽：tname 词表（逗号分隔存储；唯一字符串键）=====
+    public static final String KEY_FEED_BLOCK_TNAMES = "feed_blocked_tnames";
+
     // ===== 调试 =====
     public static final String KEY_DEBUG_ALIVE = "debug_alive_marker";
     public static final String KEY_VERBOSE = "verbose_log";
     /** 开发兜底开关：只被 v1.0 式本地 conf 文件识别；置 true 时该文件覆盖远程配置。 */
     public static final String KEY_DEV_OVERRIDE = "dev_override";
+
 
     public static final String[] ALL_KEYS = {
         KEY_MASTER,
@@ -81,6 +85,7 @@ public final class BiliConfig {
         KEY_HOME_AVATAR_MINE_ENTRY,
         KEY_HOME_TABBAR_RM_MSG,
         KEY_HOME_TABBAR_RM_MINE,
+        KEY_FEED_BLOCK_TNAMES,
         KEY_LISTEN_PAUSE_AFTER_END,
         KEY_HIDE_TRIPLE,
         KEY_HIDE_VOTE,
@@ -100,7 +105,7 @@ public final class BiliConfig {
         if (KEY_HOME_TOPBAR_MSG_BADGE.equals(key)) return true;  // v1.7.0 顶栏消息未读角标
         if (KEY_HOME_AVATAR_MINE_ENTRY.equals(key)) return true; // v1.7.0 首页布局（6.4.0）
         if (KEY_HOME_TABBAR_RM_MSG.equals(key)) return true;     // v1.7.0 底栏删消息 tab（顶栏消息入口替代）
-        if (KEY_HOME_TABBAR_RM_MINE.equals(key)) return false;   // v1.7.0 默认保留「我的」tab（顶栏头像点击需要落点；移除后深链页不完整）
+        if (KEY_HOME_TABBAR_RM_MINE.equals(key)) return true;    // v1.7.0 底栏隐藏「我的」tab（数据保留，顶栏头像经真实派发打开完整页）
         if (KEY_HIDE_TRIPLE.equals(key)) return false;
         if (KEY_HIDE_VOTE.equals(key)) return false;
         if (KEY_HIDE_UP_PROMPT.equals(key)) return false;
@@ -127,30 +132,58 @@ public final class BiliConfig {
     }
 
     /**
-     * Hook 侧加载（v1.1）：
-     * 1) 本地 conf 仅当含 dev_override=true 时作为开发覆盖生效；
-     * 2) 否则一律用出厂默认值——设计目标是「分发版零配置开箱即用」，
-     *    开关定制依赖设置页 + root 同步（开发机场景）。
+     * Hook 侧加载（LineTamer v1.6.1 同款代次协议，最小权限）：
+     * 读序 host-conf → module 副本 → B 站 files → /data/local/tmp，
+     * 每来源带 conf_gen 代次：gen 大者胜、同代次先到先得；全无代次（旧格式）
+     * 沿用静态顺序，兼容旧副本。XSharedPreferences 通道不采用（LSPosed 2.2.0
+     * 标记废弃、2.3.0 移除）。LAST_CONF_SRC 带 confSrc= 便于诊断
+     * （设置页开关可能根本到不了目标进程——HMT/QQTamer §13 教训）。
      */
     public static BiliConfig loadForHook() {
-        Map<String, Object> f = readConfFile();
-        if (f != null && Boolean.TRUE.equals(f.get(KEY_DEV_OVERRIDE))) {
-            sConfSource = "conf(dev):" + sLastConfPath;
-            return new BiliConfig(f);
+        java.util.List<String> paths = new java.util.ArrayList<String>();
+        // ⓪ 宿主自有副本：设置页经启动 Intent 投递后由 Hook 写入宿主 files
+        paths.add("/data/user/0/" + TARGET_PKG + "/files/" + HOST_CONF_NAME);
+        // ①② 模块自有两份（设置页随保存实时重写，永远最新）
+        paths.add("/data/user/0/" + MODULE_PKG + "/files/" + CONF_NAME);
+        paths.add("/data/user/0/" + MODULE_PKG + "/shared_prefs/" + CONF_NAME);
+        // ③ B 站 files（root 写，仅开发兜底）
+        paths.add("/data/data/" + TARGET_PKG + "/files/" + CONF_NAME);
+        // ④ /data/local/tmp（root 写，仅开发兜底，陈旧风险最高）
+        paths.add("/data/local/tmp/" + CONF_NAME);
+        ParsedConf best = null;
+        String bestName = null;
+        for (int i = 0; i < paths.size(); i++) {
+            ParsedConf p = parseConfPath(paths.get(i));
+            if (p == null) {
+                continue;
+            }
+            if (best == null || (p.gen > 0 && p.gen > best.gen)) {
+                best = p;
+                bestName = confSrcName(i);
+            }
         }
-        if (f != null && !f.isEmpty()) {
-            // 存在旧格式本地 conf 但未声明 dev_override：忽略，防升级后被陈旧文件劫持
-            sConfSource = "defaults(legacy-conf-ignored)";
-        } else {
-            sConfSource = "defaults";
+        if (best != null) {
+            sConfSource = bestName + " gen=" + best.gen;
+            sLastConfPath = best.path;
+            return new BiliConfig(best.map);
         }
+        sConfSource = "defaults";
         return new BiliConfig(new HashMap<String, Object>());
     }
+
+    public static final String HOST_CONF_NAME = "bili_tamer_host.conf";
+    public static final String KEY_CONF_GEN = "conf_gen";
 
     public boolean get(String key, boolean def) {
         Object v = map.get(key);
         if (v instanceof Boolean) return ((Boolean) v).booleanValue();
         return def;
+    }
+
+    /** 字符串键读取（当前仅 feed_blocked_tnames；缺失/类型不符返回空串）。 */
+    public String getString(String key) {
+        Object v = map.get(key);
+        return v instanceof String ? (String) v : "";
     }
 
     public int getInt(String key, int def) {
@@ -159,39 +192,120 @@ public final class BiliConfig {
         return def;
     }
 
-    private static Map<String, Object> readConfFile() {
-        java.util.List<String> candidates = new java.util.ArrayList<String>();
-        // 最高优先级：SettingsActivity 通过 root 同步到 B 站可读位置
-        candidates.add("/data/data/" + TARGET_PKG + "/files/" + CONF_NAME);
-        candidates.add("/data/local/tmp/" + CONF_NAME);
-        candidates.add("/data/user/0/" + MODULE_PKG + "/files/" + CONF_NAME);
-        for (String p : candidates) {
-            try {
-                File f = new File(p);
-                if (!f.isFile() || !f.canRead()) continue;
-                Map<String, Object> m = new HashMap<String, Object>();
-                java.io.BufferedReader br = new java.io.BufferedReader(
-                        new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
-                String line;
-                while ((line = br.readLine()) != null) {
-                    int i = line.indexOf('=');
-                    if (i <= 0) continue;
-                    String k = line.substring(0, i).trim();
-                    String v = line.substring(i + 1).trim();
-                    if (KEY_CODEC.equals(k) || KEY_AUDIO_QUALITY.equals(k) || KEY_HDR.equals(k)
-                            || KEY_IP_SCOPE.equals(k)) {
-                        try { m.put(k, Integer.valueOf(v)); } catch (Throwable ignored2) {}
-                    } else {
-                        m.put(k, "true".equals(v));
-                    }
-                }
-                br.close();
-                if (!m.isEmpty()) {
-                    sLastConfPath = p;
-                    return m;
-                }
-            } catch (Throwable ignored) {}
+    /** 单个 conf 来源解析结果 */
+    private static final class ParsedConf {
+        final Map<String, Object> map;
+        final long gen;
+        final String path;
+        ParsedConf(Map<String, Object> map, long gen, String path) {
+            this.map = map;
+            this.gen = gen;
+            this.path = path;
         }
-        return null;
+    }
+
+    private static String confSrcName(int i) {
+        if (i == 0) return "host-conf";
+        if (i == 1) return "module-files-conf";
+        if (i == 2) return "module-prefs-conf";
+        if (i == 3) return "files-conf";
+        return "tmp-conf";
+    }
+
+    /** 解析单个 conf 副本：kv 行 + conf_gen 代次行（BOM 去除；非已知类型键跳过）。 */
+    private static ParsedConf parseConfPath(String path) {
+        try {
+            File f = new File(path);
+            if (!f.isFile() || !f.canRead()) return null;
+            StringBuilder sb = new StringBuilder();
+            java.io.BufferedReader br = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+            br.close();
+            return parseConfText(sb.toString(), path);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** conf 全文解析：返回 kv（布尔严格 true/false；int/字符串键原样）+ 代次。 */
+    private static ParsedConf parseConfText(String text, String path) {
+        try {
+            if (text.startsWith("\uFEFF")) {
+                text = text.substring(1); // BOM 去除（HMT §13 教训）
+            }
+            Map<String, Object> m = new HashMap<String, Object>();
+            long gen = 0L;
+            for (String line : text.split("\\r?\\n")) {
+                int i = line.indexOf('=');
+                if (i <= 0) {
+                    continue;
+                }
+                String k = line.substring(0, i).trim();
+                String v = line.substring(i + 1).trim();
+                if (KEY_CONF_GEN.equals(k)) {
+                    try { gen = Long.parseLong(v); } catch (Throwable ignored2) {}
+                    continue;
+                }
+                if (KEY_DEV_OVERRIDE.equals(k)) {
+                    continue; // 新协议下 remote/host 副本即权威，不再按 dev_override 分叉
+                }
+                boolean known = false;
+                for (String key : ALL_KEYS) {
+                    if (key.equals(k)) { known = true; break; }
+                }
+                if (!known) {
+                    continue; // 未知键跳过（严格解析：假阳性教训）
+                }
+                if (KEY_CODEC.equals(k) || KEY_AUDIO_QUALITY.equals(k)
+                        || KEY_HDR.equals(k) || KEY_IP_SCOPE.equals(k)) {
+                    try { m.put(k, Integer.valueOf(v)); } catch (Throwable ignored2) {}
+                } else if (KEY_FEED_BLOCK_TNAMES.equals(k)) {
+                    m.put(k, v);
+                } else if ("true".equals(v) || "false".equals(v)) {
+                    m.put(k, Boolean.valueOf("true".equals(v)));
+                }
+            }
+            if (m.isEmpty()) {
+                return null;
+            }
+            return new ParsedConf(m, gen, path);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Hook 运行时热替换配置（启动 Intent 投递 / 主链路刷新用）：整表替换并
+     * 记录代次与来源。conf 文本规范化由调用方 writeHostConf 完成。
+     */
+    public long overrideGen = 0L;
+
+    public static BiliConfig fromConfText(String conf, long gen) {
+        ParsedConf p = parseConfText(conf, "intent");
+        if (p == null) {
+            return null;
+        }
+        BiliConfig c = new BiliConfig(p.map);
+        c.overrideGen = p.gen > 0 ? p.gen : gen;
+        sConfSource = "intent gen=" + c.overrideGen;
+        return c;
+    }
+
+    /** 规范化 conf 全文（按解析结果重建行，传输形态不落盘）。 */
+    public String toNormalizedText(long gen) {
+        StringBuilder sb = new StringBuilder();
+        for (String key : ALL_KEYS) {
+            Object v = map.get(key);
+            if (v == null) {
+                continue;
+            }
+            sb.append(key).append('=').append(v).append('\n');
+        }
+        sb.append(KEY_CONF_GEN).append('=').append(gen).append('\n');
+        return sb.toString();
     }
 }

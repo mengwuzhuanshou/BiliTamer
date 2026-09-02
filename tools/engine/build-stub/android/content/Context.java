@@ -1,6 +1,7 @@
 package android.content;
 
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 
 public class Context {
     public static final int MODE_PRIVATE = 0;
@@ -8,4 +9,6 @@ public class Context {
     public ApplicationInfo getApplicationInfo() { return null; }
     public String getPackageName() { return null; }
     public java.io.File getFilesDir() { return null; }
+    public PackageManager getPackageManager() { return null; }
+    public void startActivity(Intent intent) { }
 }

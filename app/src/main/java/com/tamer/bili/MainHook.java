@@ -4,6 +4,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
+import com.tamer.bili.hooks.FeedTagHooks;
 import com.tamer.bili.hooks.HomeNoAutoRefreshHooks;
 import com.tamer.bili.hooks.HomeUxHooks;
 import com.tamer.bili.hooks.HookApi;
@@ -83,6 +84,9 @@ public class MainHook extends XposedModule implements HookApi {
                 return;
             }
             installFeatures(main, cl);
+            if (main) {
+                installConfDelivery(cl);
+            }
             info("BiliTamer hooks installed: total=" + hookHandles.size());
         } catch (Throwable t) {
             error("onPackageReady crashed", t);
@@ -104,7 +108,8 @@ public class MainHook extends XposedModule implements HookApi {
                     + " hideVote=" + isHideVote()
                     + " hideUp=" + isHideUpPrompt()
                     + " noRefresh=" + isNoAutoRefreshEnabled()
-                    + " shareQq=" + isShareQqEnabled());
+                    + " shareQq=" + isShareQqEnabled()
+                + " feedWords=" + getFeedBlockedTnames().split(",").length);
         } catch (Throwable t) {
             warn("logConfig failed: " + t);
         }
@@ -147,6 +152,112 @@ public class MainHook extends XposedModule implements HookApi {
                     new ShareHooks(MainHook.this, cl).install();
                 }
             });
+            install("FeedTagHooks", new ThrowingAction() {
+                @Override public void run() throws Throwable {
+                    new FeedTagHooks(MainHook.this, cl).install();
+                }
+            });
+        }
+    }
+
+    /**
+     * 无 root 配置投递主链路（LineTamer v1.6.1 同款，最小权限）：设置页保存后带
+     * bili_conf/bili_gen extras 拉起 B 站，此处截获 launcher Activity 的 onCreate
+     * （冷启动）与 onNewIntent（运行中重投递），解析后写入宿主自有
+     * bili_tamer_host.conf（gen 协议保证此后每次启动首选且陈旧副本不反盖），
+     * 并热替换内存配置（词表等即时生效）。
+     */
+    private void installConfDelivery(ClassLoader cl) {
+        final String actCls = "tv.danmaku.bili.MainActivityV2"; // resolve-activity 实测 launcher
+        try {
+            Class<?> a = load(cl, actCls);
+            Method onCreate = null;
+            Method onNewIntent = null;
+            for (Class<?> k = a; k != null && k != Object.class; k = k.getSuperclass()) {
+                if (onCreate == null) {
+                    try { onCreate = k.getDeclaredMethod("onCreate", android.os.Bundle.class); } catch (Throwable ignored) {}
+                }
+                if (onNewIntent == null) {
+                    try { onNewIntent = k.getDeclaredMethod("onNewIntent", android.content.Intent.class); } catch (Throwable ignored) {}
+                }
+                if (onCreate != null && onNewIntent != null) {
+                    break;
+                }
+            }
+            XposedInterface.Hooker onC = new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object r = chain.proceed();
+                    deliver(chain.getThisObject(), chain.getThisObject() instanceof android.app.Activity
+                            ? ((android.app.Activity) chain.getThisObject()).getIntent() : null);
+                    return r;
+                }
+            };
+            XposedInterface.Hooker onN = new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object r = chain.proceed();
+                    deliver(chain.getThisObject(), chain.getArg(0));
+                    return r;
+                }
+            };
+            if (onCreate != null) {
+                deoptimize(onCreate);
+                hookHandles.add(hook((java.lang.reflect.Executable) onCreate)
+                        .setPriority(Integer.MAX_VALUE)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(onC));
+                info("conf delivery: onCreate hooked");
+            }
+            if (onNewIntent != null) {
+                deoptimize(onNewIntent);
+                hookHandles.add(hook((java.lang.reflect.Executable) onNewIntent)
+                        .setPriority(Integer.MAX_VALUE)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(onN));
+                info("conf delivery: onNewIntent hooked");
+            }
+        } catch (Throwable t) {
+            error("conf delivery install failed", t);
+        }
+    }
+
+    /** 解析投递 extras → 代次比较 → 落盘宿主副本 → 热替换内存配置。 */
+    private void deliver(Object actObj, Object intentObj) {
+        try {
+            if (!(intentObj instanceof android.content.Intent)) {
+                return;
+            }
+            android.content.Intent it = (android.content.Intent) intentObj;
+            String conf = it.getStringExtra("bili_conf");
+            if (conf == null || conf.length() == 0) {
+                return;
+            }
+            long gen = it.getLongExtra("bili_gen", 0L);
+            BiliConfig incoming = BiliConfig.fromConfText(conf, gen);
+            if (incoming == null) {
+                warn("conf delivery: parse failed");
+                return;
+            }
+            long current = config != null ? config.overrideGen : 0L;
+            if (incoming.overrideGen <= current) {
+                info("conf delivery: stale (incoming=" + incoming.overrideGen
+                        + " current=" + current + ")");
+                return;
+            }
+            try {
+                java.io.File f = new java.io.File("/data/data/" + BiliConfig.TARGET_PKG
+                        + "/files/" + BiliConfig.HOST_CONF_NAME);
+                java.io.FileOutputStream fos = new java.io.FileOutputStream(f);
+                fos.write(incoming.toNormalizedText(incoming.overrideGen).getBytes("UTF-8"));
+                fos.getFD().sync();
+                fos.close();
+                android.system.Os.chmod(f.getAbsolutePath(), 0644);
+            } catch (Throwable t) {
+                warn("conf host write failed: " + t);
+            }
+            this.config = incoming;
+            info("conf delivered via launch intent, gen=" + incoming.overrideGen);
+        } catch (Throwable t) {
+            warn("conf delivery failed: " + t);
         }
     }
 
@@ -378,6 +489,12 @@ public class MainHook extends XposedModule implements HookApi {
     public boolean isVerboseLoggingEnabled() {
         BiliConfig c = config;
         return c != null && c.get(BiliConfig.KEY_VERBOSE, false);
+    }
+
+    @Override
+    public String getFeedBlockedTnames() {
+        BiliConfig c = config;
+        return c == null ? "" : c.getString(BiliConfig.KEY_FEED_BLOCK_TNAMES);
     }
 
     // ===== 日志 =====

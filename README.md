@@ -30,7 +30,12 @@ An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`,
 | 听视频听完暂停 Pause after video | 听视频（全屏音频播放器）播完当前视频即暂停，不自动连播（零监听实现）/ Pause when the current video ends in the listen-mode fullscreen audio player instead of auto-advancing (zero-listener implementation) | 关 off |
 | 隐藏互动提示 Hide interaction hints | 一键三连动画/文案、投票面板、UP 关注引导气泡 / Hide triple-action animation, vote panel and follow-bubble hints | 关 off |
 | 首页不自动刷新 No home auto-refresh | 从后台/其它页面切回首页时不自动重载推荐流；下拉/点 tab/首次进入不受影响 / Skip the automatic feed reload when returning to the home page; manual refresh unaffected | 关 off |
-| 分享到 QQ Share to QQ | 分享面板补回 QQ 渠道，点击走 B 站自带的 QQ 互联链路，弹出 QQ 分享面板选好友/群 / Restore the QQ channel in the share panel; tapping opens QQ's native share sheet (pick friends/groups) via the app's built-in QQ OpenSDK config | 开 on |
+| 分享到 QQ Share to QQ | 分享面板补回 QQ 渠道，点击走 B 站自带的 QQ 互联链路，弹出 QQ 分享面板选好友/群 / Restore the QQ channel in the share panel; tapping opens QQ's native share sheet (pick friends/groups) via the app's built-in QQ OpenSDK config | 6.3.0 开；6.4.0 自动不注入 |
+| 首页顶栏消息入口 Top-bar message entry | 顶栏搜索栏右侧加消息图标，未读红点带数字 / A message icon on the top bar with an unread numeric badge | 开 on（6.4.0） |
+| 首页头像→我的 Avatar as Mine entry | 顶栏头像点击经真实 tab 派发打开完整「我的」页 / Avatar tap opens the full Mine tab page | 开 on（6.4.0） |
+| 底栏删 tab Bottom-bar tabs | 移除「消息」tab、隐藏「我的」tab / Remove Message tab, hide Mine tab | 开 on（6.4.0） |
+| 首页推荐分区屏蔽 Feed partition blocker | 按推荐卡分区标签（tname）整卡屏蔽；词表批量输入/检索/逐词移除，无上限 / Block feed cards by partition tag; bulk-edit/search/remove word list, no limit | 空词表不生效 |
+| 配置同步 Config sync | 设置保存经启动投递+host-conf 代次协议生效，不依赖 root / Settings delivered at launch with a host-conf generation protocol — no root needed | — |
 
 所有开关独立可逆；总开关关闭后模块完全休眠。
 Every switch is independently reversible; the master switch disables the whole module.
@@ -45,7 +50,7 @@ Every switch is independently reversible; the master switch disables the whole m
 1. 安装 APK，LSPosed 中启用模块，作用域勾选「哔哩哔哩国际版」/ install the APK, enable the module and select the Bilibili scope;
 2. 强制停止哔哩哔哩后重新打开 / force-stop Bilibili and reopen;
 3. 设置入口：LSPosed 模块详情页，或桌面「B站国际版增强」图标 / open settings from the LSPosed module page or the launcher icon;
-4. 改开关后需再次强停 B 站重开生效 / force-stop & reopen the app after changing switches.
+4. 保存设置会自动拉起 B 站并即时生效（配置经启动投递，无需 root）；若 B 站已在运行，保存后会自动投递到前台实例 / saving settings auto-launches/re-delivers the config to Bilibili without root.
 
 ### 实现要点 / How the identity rewrite works
 

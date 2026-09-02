@@ -128,8 +128,8 @@ public final class ShareHooks {
 
     /**
      * QQ 分享 25201 定论（2026-09 实测）：错误弹窗出现在 QQ 进程（截图背景为 QQ
-     * 群聊），QQ 侧直接读取调用方真实签名对比 QQ 互联平台登记值——BiliTamer
-     * 自签（bili.jks）永远不匹配，任何 SDK 参数层的 sign 伪装（含官方指纹重算）
+     * 群聊），QQ 侧直接读取调用方真实签名对比 QQ 互联平台登记值——重签名模块
+     * 自签密钥永远不匹配，任何 SDK 参数层的 sign 伪装（含官方指纹重算）
      * 都无法绕过。6.3.0 时代能过是 QQ 当时未启用该校验（近期收紧，与 B 站版本
      * 无关）。正解=绕开 tauth：hook 未混淆公开 API Tencent.shareToQQ/shareToQzone，
      * 提取 Bundle 里的链接/标题，改走系统 ACTION_SEND 定向 QQ（无签名校验），

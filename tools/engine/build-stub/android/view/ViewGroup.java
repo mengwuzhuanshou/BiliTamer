@@ -7,6 +7,7 @@ public class ViewGroup extends View {
     public void addView(View child) { }
     public void addView(View child, LayoutParams params) { }
     public void addView(View child, int index, LayoutParams params) { }
+public void removeAllViews() { }
     public int getChildCount() { return 0; }
     public View getChildAt(int index) { return null; }
 

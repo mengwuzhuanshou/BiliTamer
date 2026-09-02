@@ -313,3 +313,48 @@ method_ids(88/92)、class_defs(96/100)；uleb128 读字符串；field_id 的类�
   名字启发必须把它排掉，否则过滤形同虚设；`MediaCodecInfo
   .isHardwareAccelerated()` API 29 才转公，低版本直调 NoSuchMethodError——反射 +
   名字回退。整体用反射还有一层原因：编译桩（build-stub）不含 android.media。
+
+## 21. 6.4.0 首页底栏是 home.components 组件框架（khome 链）：删 tab 的单一数据源与形状锚定
+机制：6.4.0 首页由 tv.danmaku.bili.home.page.BaseHomeFrameFragment 装配组件（真名类）：
+底栏 tab_host ComposeView 的 content 由 home.components.bottomtab.BottomTabComponent 在
+onViewCreated 里 setContent；tab 列表来自 HomeFrameViewModel（真名）root StateFlow 状态
+对象，其页面 tab 状态类的 a 字段 = List<底栏 tab>（元素含路由 key 与选中位）。老的
+main2 经典管线（MainFragment 派生 provider、HomeTabServiceImpl、CachedResourceResolver、
+MainResourceManager）在 6.4.0 上是死代码——hook 装载成功但 UI 根本不消费。
+做法：全部按形状锚定，不依赖混淆名——hook 真名 HomeFrameViewModel 构造器拿实例 → 轮询
+其 StateFlowImpl.getValue() → 在 root 子对象里扫 size1..8 的 List 候选，按「元素 boolean
+字段数」打分区分底栏（包装类，十几个布尔）与顶栏（信息类，近零布尔）→ 对页面状态类全部
+构造器 AFTER 把列表字段替换为过滤副本（发布前改字段，无观察者）。
+注意：消息 tab 删除是数据级（页面一并消失）；「我的」删除改做渲染级——数据保留、只隐藏
+底栏画出来的 tab（hook Compose 容器函数参数替换），顶栏头像仍能经真实 tab 派发打开完整页。
+
+## 22. B 站有运行时方法保护：setContent 类方法被重写成随机名合成类
+机制：ComposeView.setContent 等热点方法的 dex 方法体在启动时被替换为每次运行随机命名的
+合成委托类（栈里可见 android.util.ChoosKees 之类随机帧），每次启动都不同。
+约束：不要把这类随机帧当锚点；hook 本身不受影响（按原方法 hook 照常触发，参数齐全）。
+Compose setContent 收到的 content 是 ComposableLambdaImpl 包装，真 lambda 类在其 Function2
+字段里；且 R8 横向合并让 lambda 载体类名不可信（底栏 lambda 会藏在 ad 包的合并类里）——
+确认 composable 身份用调用栈（new Throwable 全量抓取；hook 线程里 Thread 栈 API 会截短），
+不用类名。
+
+## 23. 首页推荐 feed 分区（tname）过滤：解析出口一处过滤 + 注解反射定位字段
+机制：feed 刷新/加载更多/预载提交三个 action 共用同一个解析器（request.g，@Singleton），
+在其 a(okhttp 响应)GeneralResponse 方法 AFTER 原地移除命中卡即覆盖全部入口，下游 Store/
+渲染消费同一列表对象。注意：PegasusViewModel 的分发入口真名随构建漂移（曾见 z0 实为无参
+预载、入口是 y0），要按签名匹配不要按名字。
+字段定位：卡片模型字段名混淆漂移，用 @SerializedName 注解反射（协议名稳定）；分区标签
+args.tname 无注解但字段名与 JSON 同名，按字段名兜底即可。取 String getter 别用「最后一个
+非空」启发式（会抓到 toString）。匹配语义建议用包含关系并在文档里讲清。
+
+## 24. 模块配置持久化：无 root 主链路 + conf_gen 代次协议（全项目通用，与共享坑 #14-17 一致）
+机制：设置页保存 → SP + 模块本地 conf 副本，每份带 conf_gen=毫秒代次；保存后以显式
+ComponentName（MAIN+LAUNCHER）拉起目标应用并附 conf/gen extras；模块在宿主 launcher
+Activity 的 onCreate（冷）/onNewIntent（热）截获，解析后写入宿主自有 files 的 host-conf
+副本（宿主 uid 读写无阻），并热替换内存配置。读取端按候选序读多来源、代次大者胜、同代次
+先到先得；无代次的旧副本（root 停写后的遗留）永远盖不过新代次。
+要点：getLaunchIntentForPackage 对模块（未声明 <queries>）在 Android 11+ 返回 null——
+必须显式组件启动；只有用户手动改动才拉起宿主（设置页自动 persist 不 launch）；宿主进程
+会带着旧模块代码存活到 force-stop，验证前先强停宿主。
+
+## 25. 代码生成模块做设备验证：先排除进程/日志/文件名的三重新鲜度
+教训：① 模块 install -r 不杀宿主进程——宿主跑旧模块代码时一切新功能都「不生效」，先 am force-stop 宿主；② LSPosed 的 verbose 日志按会话轮转且文件名含冒号，grep 时按字面文件名（含冒号）或先 ls -t 取最新文件，别手改成分隔符；③ 设置页 UI 自动化定位用uiautomator dump + 正则取 bounds，不要在盲坐标上反复点（键盘弹出会盖住按钮）。

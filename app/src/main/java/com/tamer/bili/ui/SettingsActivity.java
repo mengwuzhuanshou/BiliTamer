@@ -24,9 +24,6 @@ public class SettingsActivity extends Activity {
 
     private LinearLayout root;
     private TextView statusView;
-    /** 每个 App 进程只主动试一次 root 兜底，避免普通设备反复弹 su 授权/刷失败日志。 */
-    private static boolean sRootTried;
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -101,8 +98,8 @@ public class SettingsActivity extends Activity {
                 "消息入口已上移到顶栏时移除底栏对应 tab。实验性：部分版本底栏\n"
                 + "为 Compose 直出，可能不生效；改后需强停 B 站重开");
         addSwitch(BiliConfig.KEY_HOME_TABBAR_RM_MINE, "底栏移除「我的」tab（实验）", "Remove mine tab (beta)",
-                "「我的」入口已上移到顶栏头像时移除底栏对应 tab。实验性：移除后\n"
-                + "头像点击将退化为深链打开（页面不完整），故默认关闭；改后需强停");
+                "「我的」入口已上移到顶栏头像时从底栏隐藏该 tab（数据保留，\n"
+                + "头像点击仍可打开完整「我的」页）。仅适配 6.4.0；改后需强停");
         addRadio(BiliConfig.KEY_AUDIO_QUALITY, "音质选项", "Audio quality",
                 new String[]{"顺位 Auto (杜比>无损>AAC)", "锁定 AAC", "锁定杜比全景声", "锁定 Hi-Res 无损"},
                 new int[]{0, 1, 2, 3},
@@ -138,6 +135,48 @@ public class SettingsActivity extends Activity {
         addSwitch(BiliConfig.KEY_NO_AUTO_REFRESH, "首页不自动刷新", "No auto refresh on home",
                 "从后台/其它页面切回首页时不自动重新加载推荐流（省流量、省电）；\n"
                 + "手动下拉刷新、点击 tab、首次进入不受影响");
+
+        section("首页推荐分区屏蔽", "Feed partition blocker");
+        LinearLayout tagRow = new LinearLayout(this);
+        tagRow.setOrientation(LinearLayout.HORIZONTAL);
+        tagRow.setGravity(Gravity.CENTER_VERTICAL);
+        tagRow.setPadding(0, dp * 10, 0, dp * 10);
+        LinearLayout tagCol = new LinearLayout(this);
+        tagCol.setOrientation(LinearLayout.VERTICAL);
+        TextView tagT1 = new TextView(this);
+        int tagN = 0;
+        for (String w : getSp().getString(BiliConfig.KEY_FEED_BLOCK_TNAMES, "").split(",")) {
+            if (w.trim().length() > 0) tagN++;
+        }
+        tagT1.setText("屏蔽分区词管理（当前 " + tagN + " 个）");
+        tagT1.setTextColor(Color.parseColor("#222222"));
+        tagT1.setTextSize(16);
+        tagCol.addView(tagT1);
+        TextView tagT2 = new TextView(this);
+        tagT2.setText("Manage blocked feed partitions");
+        tagT2.setTextColor(Color.parseColor("#AAAAAA"));
+        tagT2.setTextSize(11);
+        tagCol.addView(tagT2);
+        TextView tagT3 = new TextView(this);
+        tagT3.setText("推荐卡的分区(tname)包含任一词即整卡移除。支持批量输入\n"
+                + "（逗号/换行分隔）、检索定位、逐词移除；词数无上限；改后需强停 B 站重开");
+        tagT3.setTextColor(Color.parseColor("#888888"));
+        tagT3.setTextSize(12);
+        tagCol.addView(tagT3);
+        tagRow.addView(tagCol, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        android.widget.Button tagBtn = new android.widget.Button(this);
+        tagBtn.setText("管理");
+        tagBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                startActivity(new android.content.Intent(SettingsActivity.this,
+                        FeedTagSettingsActivity.class));
+            }
+        });
+        tagRow.addView(tagBtn, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(tagRow, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         section("调试", "Debug");
         addSwitch(BiliConfig.KEY_DEBUG_ALIVE, "写存活标记", "Alive marker",
@@ -298,146 +337,27 @@ public class SettingsActivity extends Activity {
         return getSharedPreferences(BiliConfig.PREFS_NAME, MODE_PRIVATE);
     }
 
-    /** 汇总当前完整开关集（SP 现值 + 出厂默认补齐）。 */
-    private java.util.LinkedHashMap<String, Object> collectKv() {
-        java.util.LinkedHashMap<String, Object> kv = new java.util.LinkedHashMap<String, Object>();
-        for (String key : BiliConfig.ALL_KEYS) {
-            if (BiliConfig.KEY_CODEC.equals(key) || BiliConfig.KEY_AUDIO_QUALITY.equals(key)
-                    || BiliConfig.KEY_HDR.equals(key)) {
-                kv.put(key, Integer.valueOf(getSp().getInt(key, BiliConfig.defaultIntOf(key))));
-            } else {
-                kv.put(key, Boolean.valueOf(getSp().getBoolean(key, BiliConfig.defaultValueOf(key))));
-            }
-        }
-        return kv;
-    }
-
-    /** 设置页签发的 conf 携带 dev_override=true：root 同步的意图必须覆盖出厂默认。 */
-    private static String kvConfText(java.util.Map<String, Object> kv) {
-        StringBuilder sb = new StringBuilder();
-        sb.append(BiliConfig.KEY_DEV_OVERRIDE).append("=true").append('\n');
-        for (java.util.Map.Entry<String, Object> en : kv.entrySet()) {
-            sb.append(en.getKey()).append('=').append(String.valueOf(en.getValue())).append('\n');
-        }
-        return sb.toString();
-    }
-
-    /**
-     * v1.1 主持久化：远程通道必写（无 root 主链路）；
-     * root 本地副本仅在「远程未就绪」或「详细日志(开发)」时尝试，且每进程至多一次。
-     */
-    /**
-     * 本地 root 同步（开发/授权场景）。无 root 时仅提示：
-     * 出厂默认已让模块核心能力开箱即用，定制开关需授权后同步。
-     */
     private void persistAll(boolean auto) {
-        java.util.LinkedHashMap<String, Object> kv = collectKv();
-
-        int rcRoot = Integer.MIN_VALUE;
-        if (!sRootTried || getSp().getBoolean(BiliConfig.KEY_VERBOSE, false)) {
-            sRootTried = true;
-            rcRoot = rootSyncLegacy(kv);
-        }
-
-        StringBuilder st = new StringBuilder("状态：本地副本");
-        if (rcRoot == Integer.MIN_VALUE) {
-            st.append("：本次未尝试");
-        } else if (rcRoot == 0) {
-            st.append("=✅ 已同步（root）");
+        long gen = ConfSync.saveAll(this);
+        String st;
+        if (gen > 0) {
+            // 无 root 主链路：仅用户手动改动（auto=false）才拉起 B 站投递配置；
+            // auto（打开设置页/兜底补推）只落盘，避免打开设置页就切走前台。
+            if (!auto) {
+                ConfSync.launchTargetWithConf(this);
+            }
+            st = "状态：✅ 已保存（gen=" + gen + "）"
+                    + (auto ? "" : "，正在拉起 B 站同步配置")
+                    + "\nconf 探针见 B 站启动日志首行 confSrc=";
         } else {
-            st.append("=❌ 无 root 权限——出厂默认继续生效，开关定制暂不可用");
+            st = "状态：❌ 保存失败\nconf 探针见 B 站启动日志首行 confSrc=";
         }
-        st.append("\nconf 探针见 B 站启动日志首行 confSrc=");
         statusView.setText(st.toString());
-        android.util.Log.i("BiliTamer", "persistAll: rcRoot=" + rcRoot + " auto=" + auto);
-
+        android.util.Log.i("BiliTamer", "persistAll: gen=" + gen + " auto=" + auto);
         if (!auto) {
-            String msg;
-            if (rcRoot == 0) msg = "已保存，强制停止 B 站重开后生效";
-            else msg = "已保存到本应用；切换实际生效需 root 同步成功（当前无权限）";
-            Toast.makeText(SettingsActivity.this, msg, Toast.LENGTH_SHORT).show();
+            Toast.makeText(SettingsActivity.this,
+                    gen > 0 ? "已保存，正在拉起 B 站同步配置" : "保存失败",
+                    Toast.LENGTH_SHORT).show();
         }
-    }
-
-    /** 开发兜底：按 v1.0 三副本写本地 conf（不含 dev_override，正常不会劫持分发版）。 */
-    private int rootSyncLegacy(java.util.Map<String, Object> kv) {
-        try {
-            makeWorldReadable();
-        } catch (Throwable ignored) {
-        }
-        byte[] data;
-        try {
-            data = kvConfText(kv).getBytes("UTF-8");
-        } catch (Throwable e) {
-            return -200;
-        }
-        try {
-            writeConf(new java.io.File(getFilesDir(), BiliConfig.CONF_NAME), data);
-        } catch (Throwable ignored) {
-        }
-        try {
-            java.io.File prefsDir = new java.io.File(getFilesDir().getParentFile(), "shared_prefs");
-            if (prefsDir.isDirectory()) {
-                writeConf(new java.io.File(prefsDir, BiliConfig.CONF_NAME), data);
-            }
-        } catch (Throwable ignored) {
-        }
-        int worst;
-        try {
-            java.io.File tmp = new java.io.File(getFilesDir(), "bili_tamer_global.tmp");
-            writeConf(tmp, data);
-            int r1 = suRun("cat '" + tmp.getAbsolutePath() + "' > /data/local/tmp/"
-                    + BiliConfig.CONF_NAME + " && chmod 644 /data/local/tmp/" + BiliConfig.CONF_NAME);
-            int r2 = suRun("mkdir -p /data/data/" + BiliConfig.TARGET_PKG + "/files && cat '"
-                    + tmp.getAbsolutePath() + "' > /data/data/" + BiliConfig.TARGET_PKG
-                    + "/files/" + BiliConfig.CONF_NAME
-                    + " && chmod 644 /data/data/" + BiliConfig.TARGET_PKG + "/files/" + BiliConfig.CONF_NAME);
-            worst = Math.min(r1, r2);   // 任一非 0 即视为本地通道失败
-            android.util.Log.i("BiliTamer", "root legacy sync rc_tmp=" + r1 + " rc_bili=" + r2);
-        } catch (Throwable t) {
-            android.util.Log.e("BiliTamer", "root legacy sync ex: " + t);
-            worst = -300;
-        }
-        return worst;
-    }
-
-    private static int suRun(String cmd) {
-        try {
-            ProcessBuilder pb = new ProcessBuilder("su", "-c", cmd);
-            pb.redirectErrorStream(true);
-            Process prc = pb.start();
-            java.io.InputStream in = prc.getInputStream();
-            byte[] buf = new byte[256];
-            while (in.read(buf) != -1) { /* drain */ }
-            in.close();
-            return prc.waitFor();
-        } catch (Throwable t) {
-            return -400;
-        }
-    }
-
-
-    private void writeConf(java.io.File f, byte[] data) throws Exception {
-        java.io.FileOutputStream fos = new java.io.FileOutputStream(f);
-        try {
-            fos.write(data);
-        } finally {
-            fos.close();
-        }
-    }
-
-    private void makeWorldReadable() {
-        try {
-            java.io.File dir = getFilesDir();
-            if (dir != null && dir.exists()) {
-                dir.setExecutable(true, false);
-                dir.setReadable(true, false);
-                java.io.File f = new java.io.File(dir, BiliConfig.CONF_NAME);
-                if (f.exists()) {
-                    f.setReadable(true, false);
-                    f.setExecutable(true, false);
-                }
-            }
-        } catch (Throwable ignored) {}
     }
 }

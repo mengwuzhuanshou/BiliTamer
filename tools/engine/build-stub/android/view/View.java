@@ -20,6 +20,7 @@ public class View {
     public View findViewWithTag(Object tag) { return null; }
     public int getHeight() { return 0; }
     public int getWidth() { return 0; }
+    public int getId() { return NO_ID; }
     public void getLocationOnScreen(int[] outLocation) { }
     public View getRootView() { return null; }
     public boolean dispatchTouchEvent(MotionEvent event) { return false; }

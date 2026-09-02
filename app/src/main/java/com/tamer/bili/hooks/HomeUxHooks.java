@@ -26,8 +26,11 @@ import android.widget.TextView;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -81,6 +84,30 @@ public final class HomeUxHooks {
     /** tab_host ComposeView 的资源 id（0x7f0938b4，设备版 uiautomator 实测同名同 id）。 */
     private static final int TAB_HOST_VIEW_ID = 0x7f0938b4;
 
+    // ===== Compose content 探针（Pegasus 底栏专项 RE）=====
+    /** 已探测过 setContent 的 loader（主 loader + main2 插件 loader 各试一次）。 */
+    private final Set<ClassLoader> composeProbedLoaders =
+            Collections.synchronizedSet(new HashSet<ClassLoader>());
+    /** 已 hook 的 setContent 方法（跨 loader 去重）。 */
+    private final Set<String> composeHooked =
+            Collections.synchronizedSet(new HashSet<String>());
+    /** 已打印过的 lambda 类名（去重限流；栈只随首次打印）。 */
+    private final Set<String> composeLogged =
+            Collections.synchronizedSet(new HashSet<String>());
+    /** tab_host 类名链真名打印只做一次。 */
+    private final AtomicBoolean composeTruthDone = new AtomicBoolean(false);
+
+    // ===== khome 底栏 tab 模型探针/过滤（v1.7.0 Pegasus 专项 v2）=====
+    /** HomeFrameViewModel 实例（真名类，状态中枢）。 */
+    private final AtomicReference<Object> khomeVmRef = new AtomicReference<Object>(null);
+    private final AtomicBoolean khomeFilterArmed = new AtomicBoolean(false);
+    /** 运行时发现的（按形状）：页面 tab 状态类（KC1.e 形状）与其 List 字段。 */
+    private volatile Class<?> khomePageStateCls;
+    private volatile java.lang.reflect.Field khomeTabListField;
+    private volatile Class<?> khomeTabItemCls;
+    private volatile java.lang.reflect.Field khomeItemNameField; // KC1.d.b（String 路由名）
+    private int khomeProbeAttempts = 0;
+
     /**
      * tv.danmaku.bili.ui.main2.* 在插件化 ClassLoader 里加载（主加载器里的同名类
      * 是死拷贝——直接 hook 全部静默）。loadClass 嗅探到真实加载器后一次性重装
@@ -103,6 +130,16 @@ public final class HomeUxHooks {
         installGroup("loader sniffer", new ThrowingAction() {
             @Override public void run() throws Throwable {
                 installLoaderSniffer();
+            }
+        });
+        installGroup("compose content probe", new ThrowingAction() {
+            @Override public void run() throws Throwable {
+                installComposeContentProbe(cl);
+            }
+        });
+        installGroup("khome tab model probe", new ThrowingAction() {
+            @Override public void run() throws Throwable {
+                installKhomeTabProbe(cl);
             }
         });
         api.info("HomeUxHooks installed");
@@ -176,6 +213,11 @@ public final class HomeUxHooks {
             installResourceManagerFilter(uiCl);
         } catch (Throwable t) {
             api.error("homeux: funnel(rm tab cache) unavailable", t);
+        }
+        try {
+            installComposeContentProbe(uiCl);
+        } catch (Throwable t) {
+            api.error("homeux: compose probe (ui loader) unavailable", t);
         }
         api.info("homeux: main2 funnels installed under " + uiCl);
     }
@@ -324,17 +366,17 @@ public final class HomeUxHooks {
             overlay.addView(msgBtn, lp);
         }
         api.info("homeux: topbar decorated avatar=" + avatarEntry + " msgIcon=" + msgIcon);
-        if (api.isHomeTabbarRemoveMessage() || api.isHomeTabbarRemoveMine()) {
-            bar.postDelayed(new Runnable() {
-                @Override public void run() {
+        bar.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (api.isHomeTabbarRemoveMessage() || api.isHomeTabbarRemoveMine()) {
                     try {
                         applyTabRemoval(barGroup);
                     } catch (Throwable t) {
                         api.error("homeux: applyTabRemoval failed", t);
                     }
                 }
-            }, 3000L);
-        }
+            }
+        }, 3000L);
     }
 
     private void openRoute(View v, String uri) {
@@ -376,7 +418,11 @@ public final class HomeUxHooks {
      */
     private void openMineEntry(View v) {
         String url = mineTabUrl != null ? mineTabUrl : "bilibili://user_center/mine";
-        // 首选：合成一次对底栏「我的」tab 的真实点击（页面 = 完整 tab 页面，含底部功能区）。
+        // 首选：真实 tab 选中派发（底栏 Compose 点击 handler 同一条链，无合成触摸）。
+        if (mineTabKept && dispatchMineTabSelect()) {
+            return;
+        }
+        // 次选：合成一次对底栏「我的」tab 的真实点击（兜底保留；页面同样完整）。
         if (mineTabKept && tapBottomTab(v, (mineSlotIndex + 0.5f) / Math.max(1, keptTabCount))) {
             api.info("homeux: avatar -> synthesized tap on mine tab (slot " + mineSlotIndex
                     + "/" + keptTabCount + ")");
@@ -405,6 +451,56 @@ public final class HomeUxHooks {
             }
         }
         openRoute(v, url);
+    }
+
+    /**
+     * 真实派发：底栏 Compose 点击 handler（BottomTabComponent）对非选中 tab 调用的就是
+     * HomeFrameViewModel.w0(new C5956c(index))（jadx 名；dex 真名 FC1.c，实现 FC1.b
+     * 接口、字段 I a）。C5956c/FC1.c 属混淆名随构建漂移 → 按形状校验后使用：
+     * vm 的 void 单参接口方法 && 参数接口可由 action 类实现 && action 有 (int) 构造器。
+     * 任一环失败返回 false，走合成点击兜底。
+     */
+    private boolean dispatchMineTabSelect() {
+        try {
+            Object vm = khomeVmRef.get();
+            if (vm == null) {
+                return false;
+            }
+            ClassLoader vmCl = vm.getClass().getClassLoader();
+            Class<?> actionCls;
+            try {
+                actionCls = api.load(vmCl, "FC1.c");
+            } catch (Throwable t) {
+                api.warn("khome: tab select action class FC1.c not loadable (name drift?)");
+                return false;
+            }
+            java.lang.reflect.Constructor<?> intCtor = null;
+            try {
+                intCtor = actionCls.getConstructor(int.class);
+            } catch (NoSuchMethodException ignored) {
+            }
+            if (intCtor == null) {
+                api.warn("khome: FC1.c has no (int) ctor (shape drift?)");
+                return false;
+            }
+            for (Method mm : vm.getClass().getDeclaredMethods()) {
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length == 1 && Void.TYPE.equals(mm.getReturnType())
+                        && ps[0].isInterface() && ps[0].isAssignableFrom(actionCls)) {
+                    mm.setAccessible(true);
+                    Object action = intCtor.newInstance(mineSlotIndex);
+                    mm.invoke(vm, action);
+                    api.info("homeux: avatar -> real tab select dispatch (slot " + mineSlotIndex
+                            + "/" + keptTabCount + ", action=" + actionCls.getName() + ")");
+                    return true;
+                }
+            }
+            api.warn("khome: dispatch method taking " + actionCls.getName() + " not found on vm");
+            return false;
+        } catch (Throwable t) {
+            api.error("homeux: real tab select dispatch failed", t);
+            return false;
+        }
     }
 
     /**
@@ -887,6 +983,634 @@ public final class HomeUxHooks {
                 mineTabKept = false;
             }
         }
+    }
+
+    // ===== Compose content 探针（Pegasus 底栏专项 RE，v1.7.0）=====
+
+    /**
+     * ComposeView.setContent(Function2) 是 Compose 自家公开 API（AXML 里 inflate 的
+     * View 类名不能混淆），content lambda 的实现类名 = 宿主类$函数名$N，直接暴露
+     * 底栏 composable 身份。按名尝试 androidx 两个候选类；真名以 composeTruthWalk
+     * 的设备实测为准（androidx 内部类可能被重命名，但 ComposeView 本体必真名）。
+     */
+    private void installComposeContentProbe(ClassLoader loader) {
+        if (loader == null || !composeProbedLoaders.add(loader)) {
+            return;
+        }
+        String[] candidates = {
+                "androidx.compose.ui.platform.ComposeView",
+                "androidx.compose.ui.platform.AbstractComposeView",
+        };
+        int hooked = 0;
+        for (String name : candidates) {
+            try {
+                hooked += hookSetContent(api.load(loader, name));
+            } catch (Throwable t) {
+                api.warn("compose: " + name + " not loadable from " + loader + ": " + t);
+            }
+        }
+        api.info("compose: probe install ok, hooked=" + hooked + " loader=" + loader);
+    }
+
+    /** 挂类上全部 setContent(单参 Function2)（含子类覆写），返回挂上数。 */
+    private int hookSetContent(Class<?> cls) {
+        int hooked = 0;
+        for (Method mm : cls.getDeclaredMethods()) {
+            if (!"setContent".equals(mm.getName()) || mm.getParameterTypes().length != 1) {
+                continue;
+            }
+            String p = mm.getParameterTypes()[0].getName();
+            if (!p.endsWith("Function2")) {
+                api.info("compose: skip " + cls.getName() + ".setContent(" + p + ")");
+                continue;
+            }
+            String key = System.identityHashCode(mm.getDeclaringClass().getClassLoader())
+                    + "#" + mm.toString();
+            if (!composeHooked.add(key)) {
+                continue;
+            }
+            try {
+                api.deoptimize(mm);
+                api.addHook("compose: " + cls.getName() + ".setContent", mm, new XposedInterface.Hooker() {
+                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        Object result = chain.proceed();
+                        logComposeContent(chain.getThisObject(), chain.getArg(0));
+                        return result;
+                    }
+                });
+                hooked++;
+                api.info("compose: hooked " + cls.getName() + ".setContent(" + p + ")");
+            } catch (Throwable t) {
+                api.error("compose: hook " + cls.getName() + ".setContent failed", t);
+            }
+        }
+        return hooked;
+    }
+
+/**
+ * 打 content lambda 真实实现类名。setContent 收到的常是 ComposableLambdaImpl
+ * （composeLambda 记忆化包装），真身份在其内部 Function2 字段（block）的实现类——
+ * 递归解包最多 3 层。首次出现时用 new Throwable() 抓全调用栈（hook 线程内
+ * Thread.currentThread().getStackTrace() 在 LSPosed 下会截短）。
+ */
+    private void logComposeContent(Object viewObj, Object lambda) {
+        try {
+            String viewCls = viewObj == null ? "null" : viewObj.getClass().getName();
+            int vid = viewObj instanceof View ? ((View) viewObj).getId() : View.NO_ID;
+            boolean tabHost = vid == TAB_HOST_VIEW_ID;
+            Object real = lambda;
+            int depth = 0;
+            while (depth < 3) {
+                Object inner = unwrapFunction2(real);
+                if (inner == null || inner == real) {
+                    break;
+                }
+                real = inner;
+                depth++;
+            }
+            String lambdaCls = lambda == null ? "null" : lambda.getClass().getName();
+            String realCls = real == null ? "null" : real.getClass().getName();
+            String key = lambdaCls + "|" + viewCls + "|" + realCls;
+            boolean first = composeLogged.add(key);
+            if (!first && !tabHost) {
+                return;
+            }
+            String stackKey = (tabHost ? "tabhost|" : "") + realCls;
+            boolean stackFirst = tabHost ? composeLogged.add(stackKey) : first;
+            Object parent = viewObj instanceof View ? ((View) viewObj).getParent() : null;
+            api.info("compose: setContent view=" + viewCls + " id=0x" + Integer.toHexString(vid)
+                    + (tabHost ? " [TAB_HOST]" : "")
+                    + " parent=" + (parent == null ? "null" : parent.getClass().getName())
+                    + " wrapper=" + lambdaCls + " real=" + realCls + " depth=" + depth
+                    + " loader=" + shortLoader(real));
+            if (depth == 0 && lambda != null && tabHost) {
+                StringBuilder fds = new StringBuilder("compose: wrapper fields[");
+                for (Class<?> k = lambda.getClass(); k != null && k != Object.class; k = k.getSuperclass()) {
+                    for (Field ff : k.getDeclaredFields()) {
+                        fds.append(k.getSimpleName()).append(".").append(ff.getName())
+                           .append(":").append(ff.getType().getName()).append(" ");
+                    }
+                }
+                api.info(fds.append("]").toString());
+            }
+            if (stackFirst) {
+                StackTraceElement[] st = new Throwable().getStackTrace();
+                StringBuilder sb = new StringBuilder("compose: stack for ").append(realCls).append(":");
+                int kept = 0;
+                for (StackTraceElement e : st) {
+                    String c = e.getClassName();
+                    if (c.startsWith("java.lang.Thread") || c.startsWith("com.tamer.bili")
+                            || "java.lang.reflect.Method".equals(c)) {
+                        continue;
+                    }
+                    sb.append("\n  at ").append(c).append(".").append(e.getMethodName());
+                    if (++kept >= 40) {
+                        break;
+                    }
+                }
+                api.info(sb.toString());
+            }
+            if (tabHost && viewObj != null && composeTruthDone.compareAndSet(false, true)) {
+                StringBuilder chain = new StringBuilder("compose: tab_host class chain:");
+                for (Class<?> k = viewObj.getClass(); k != null && k != Object.class; k = k.getSuperclass()) {
+                    chain.append("\n  ").append(k.getName());
+                }
+                api.info(chain.toString());
+            }
+        } catch (Throwable t) {
+            api.error("compose: log failed", t);
+        }
+    }
+
+    /**
+     * 在对象（沿类链）上找第一个「值实现 Function2 接口」的字段读出实例
+     * （ComposableLambdaImpl.block；声明类型可能被 R8 合并改型，按值形态判）。
+     */
+    private Object unwrapFunction2(Object o) {
+        if (o == null) {
+            return null;
+        }
+        try {
+            for (Class<?> k = o.getClass(); k != null && k != Object.class; k = k.getSuperclass()) {
+                for (Field f : k.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                        continue;
+                    }
+                    f.setAccessible(true);
+                    Object v = f.get(o);
+                    if (v != null && v != o && implementsFunction2(v.getClass())) {
+                        return v;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /** 值的类链（含接口）上是否有 *Function2。 */
+    private boolean implementsFunction2(Class<?> c) {
+        for (Class<?> k = c; k != null && k != Object.class; k = k.getSuperclass()) {
+            if (k.getName().endsWith("Function2")) {
+                return true;
+            }
+            for (Class<?> i : k.getInterfaces()) {
+                if (i.getName().endsWith("Function2")) {
+                    return true;
+                }
+                for (Class<?> i2 : i.getInterfaces()) {
+                    if (i2.getName().endsWith("Function2")) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /** loader 缩写（避免整段 PathClassLoader 字符串刷屏）。 */
+    private String shortLoader(Object o) {
+        if (o == null) {
+            return "null";
+        }
+        ClassLoader l = o.getClass().getClassLoader();
+        return l == null ? "bootstrap"
+                : l.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(l));
+    }
+
+    // ===== khome 底栏 tab 模型探针/过滤（v2，形状锚定）=====
+
+    /**
+     * 6.4.0 底栏=tv.danmaku.bili.home.components.bottomtab.BottomTabComponent（真名），
+     * tab 列表源=HomeFrameViewModel（真名）root StateFlow 的 DC1.a.c.a=List<KC1.d>
+     * （混淆名随构建漂移）。做法全形状锚定：
+     *  1) hook 真名类 HomeFrameViewModel 构造器拿实例；
+     *  2) 轮询其 StateFlowImpl 字段 getValue() 的 root 对象；
+     *  3) root→字段→size1..8 的 List、元素含 String 字段+boolean 字段 → 锁定
+     *     页面状态类/列表字段/元素类；首次打全量明细（设备真值校准过滤词）；
+     *  4) hook 页面状态类全部构造器 AFTER，把列表字段换成按 tab 路由名过滤的副本
+     *     （构造器返回前改字段，发布前无观察者；底栏/pager/角标同源全一致）。
+     */
+    private void installKhomeTabProbe(ClassLoader loader) throws Throwable {
+        if (loader == null) {
+            return;
+        }
+        Class<?> vmCls = api.load(loader, "tv.danmaku.bili.khome.vm.HomeFrameViewModel");
+        for (final java.lang.reflect.Constructor<?> ctor : vmCls.getDeclaredConstructors()) {
+            ctor.setAccessible(true);
+            api.addHookCtor("khome: frame vm ctor", ctor, new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object result = chain.proceed();
+                    try {
+                        if (khomeVmRef.compareAndSet(null, result)) {
+                            api.info("khome: HomeFrameViewModel captured " + result.getClass().getName());
+                            scheduleKhomeDiscovery();
+                        }
+                    } catch (Throwable t) {
+                        api.error("khome: vm capture failed", t);
+                    }
+                    return result;
+                }
+            });
+        }
+        api.info("khome: probe hooks ok, ctors=" + vmCls.getDeclaredConstructors().length);
+    }
+
+    private void scheduleKhomeDiscovery() {
+        uiHandler.postDelayed(new Runnable() {
+            @Override public void run() {
+                try {
+                    if (!discoverKhomeTabModel()) {
+                        khomeProbeAttempts++;
+                        if (khomeProbeAttempts <= 15) {
+                            uiHandler.postDelayed(this, 2000L);
+                        } else {
+                            api.warn("khome: tab model discovery gave up after " + khomeProbeAttempts + " attempts");
+                        }
+                    }
+                } catch (Throwable t) {
+                    api.error("khome: discovery failed", t);
+                }
+            }
+        }, 2500L);
+    }
+
+    /** true=发现并武装过滤；false=数据未就绪（继续轮询）。 */
+    private boolean discoverKhomeTabModel() throws Exception {
+        if (khomeFilterArmed.get()) {
+            return true;
+        }
+        Object vm = khomeVmRef.get();
+        if (vm == null) {
+            return false;
+        }
+        Object root = null;
+        for (Field f : vm.getClass().getDeclaredFields()) {
+            if (!f.getType().getName().endsWith("StateFlowImpl")) {
+                continue;
+            }
+            f.setAccessible(true);
+            Object flow = f.get(vm);
+            if (flow != null) {
+                root = flow.getClass().getMethod("getValue").invoke(flow);
+            }
+            break;
+        }
+        if (root == null) {
+            return false;
+        }
+        if (!root.getClass().getName().equals(String.valueOf(khomeRootClsName()))) {
+            khomeRootClsName(root.getClass().getName());
+            api.info("khome: root state class=" + root.getClass().getName());
+        }
+        // root→子对象→全部 List(1..8) 候选：元素有 String 字段。底栏元素是包装类
+        // （KC1.d：13 个 boolean 选中/标志位），顶栏元素直接是 JC1.n（1 个 boolean）
+        // —— 按「元素 boolean 字段数」打分取最高，避免选成顶栏列表。
+        Class<?> bestChildCls = null;
+        Field bestListField = null;
+        Field bestNameField = null;
+        List<?> bestList = null;
+        int bestScore = -1;
+        StringBuilder cands = new StringBuilder();
+        for (Field rf : root.getClass().getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(rf.getModifiers())) {
+                continue;
+            }
+            rf.setAccessible(true);
+            Object child = rf.get(root);
+            if (child == null || isSimple(child)) {
+                continue;
+            }
+            for (Field cf : child.getClass().getDeclaredFields()) {
+                if (!List.class.isAssignableFrom(cf.getType())) {
+                    continue;
+                }
+                cf.setAccessible(true);
+                Object lv = cf.get(child);
+                if (!(lv instanceof List)) {
+                    continue;
+                }
+                List<?> list = (List<?>) lv;
+                if (list.isEmpty() || list.size() > 8) {
+                    continue;
+                }
+                Object first = list.get(0);
+                if (first == null) {
+                    continue;
+                }
+                Field nameF = findStringField(first.getClass());
+                if (nameF == null) {
+                    continue;
+                }
+                int bools = 0;
+                for (Field bf : first.getClass().getDeclaredFields()) {
+                    if (bf.getType() == boolean.class
+                            && !java.lang.reflect.Modifier.isStatic(bf.getModifiers())) {
+                        bools++;
+                    }
+                }
+                int score = bools * 10 + first.getClass().getDeclaredFields().length;
+                cands.append("\n  cand root.").append(rf.getName()).append(".")
+                        .append(cf.getName()).append(" size=").append(list.size())
+                        .append(" item=").append(first.getClass().getName())
+                        .append(" bools=").append(bools).append(" score=").append(score);
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestChildCls = child.getClass();
+                    bestListField = cf;
+                    bestNameField = nameF;
+                    bestList = list;
+                }
+            }
+        }
+        if (bestChildCls == null || bestScore < 20) {
+            api.warn("khome: no bottom-tab-like list yet (need bools>=2), candidates:"
+                    + (cands.length() == 0 ? " none" : cands.toString()));
+            return false;
+        }
+        khomePageStateCls = bestChildCls;
+        khomeTabListField = bestListField;
+        khomeTabItemCls = bestList.get(0).getClass();
+        khomeItemNameField = bestNameField;
+        api.info("khome: candidates:" + cands);
+        logTabModelDetails(root, bestChildCls, bestListField, bestList, bestNameField);
+        armKhomeFilter();
+        return true;
+    }
+
+    private String khomeRootClsName;
+
+    private String khomeRootClsName() {
+        return khomeRootClsName;
+    }
+
+    private void khomeRootClsName(String v) {
+        khomeRootClsName = v;
+    }
+
+    private boolean isSimple(Object o) {
+        return o instanceof String || o instanceof Number || o instanceof Boolean
+                || o instanceof Character || o instanceof List;
+    }
+
+    /** 元素类上找 String 字段（KC1.d.b=tab 路由名；兜底取唯一 String 实例字段）。 */
+    private Field findStringField(Class<?> itemCls) {
+        Field named = null;
+        try {
+            named = itemCls.getDeclaredField("b");
+            if (named.getType() == String.class) {
+                named.setAccessible(true);
+                return named;
+            }
+        } catch (NoSuchFieldException ignored) {
+        }
+        for (Field f : itemCls.getDeclaredFields()) {
+            if (f.getType() == String.class
+                    && !java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                f.setAccessible(true);
+                return f;
+            }
+        }
+        return null;
+    }
+
+    /** 首次打全量 tab 明细（每元素的 String 名 + boolean 字段），校准过滤词。 */
+    private void logTabModelDetails(Object root, Class<?> childCls, Field cf, List<?> list, Field nameF) {
+        try {
+            StringBuilder sb = new StringBuilder("khome: tab model found root=")
+                    .append(root.getClass().getName())
+                    .append(" state=").append(childCls.getName())
+                    .append(".").append(cf.getName())
+                    .append(" item=").append(list.get(0).getClass().getName())
+                    .append(" nameField=").append(nameF.getName())
+                    .append(" size=").append(list.size())
+                    .append(" items[");
+            for (int i = 0; i < list.size(); i++) {
+                Object it = list.get(i);
+                sb.append("\n  [").append(i).append("] ").append(it.getClass().getSimpleName()).append(":");
+                for (Field f : it.getClass().getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                        continue;
+                    }
+                    f.setAccessible(true);
+                    Object v = f.get(it);
+                    if (v instanceof String || v instanceof Boolean || v instanceof Number) {
+                        sb.append(" ").append(f.getName()).append("=").append(v);
+                    } else if (v != null && !isSimple(v)) {
+                        // 一层嵌套：tab 信息对象（JC1.n 形状）里的 String 字段
+                        StringBuilder inner = new StringBuilder();
+                        for (Field f2 : v.getClass().getDeclaredFields()) {
+                            if (f2.getType() != String.class
+                                    || java.lang.reflect.Modifier.isStatic(f2.getModifiers())) {
+                                continue;
+                            }
+                            f2.setAccessible(true);
+                            Object v2 = f2.get(v);
+                            if (v2 != null && ((String) v2).length() > 0) {
+                                inner.append(" ").append(f2.getName()).append("=").append(v2);
+                            }
+                        }
+                        if (inner.length() > 0) {
+                            sb.append(" ").append(f.getName()).append("{").append(inner).append(" }");
+                        }
+                    }
+                }
+            }
+            api.info(sb.append(" ]").toString());
+        } catch (Throwable t) {
+            api.error("khome: tab detail log failed", t);
+        }
+    }
+
+    /** 武装：hook 页面状态类全部构造器 AFTER 过滤列表字段 + 底栏渲染隐藏「我的」。 */
+    private void armKhomeFilter() {
+        if (!khomeFilterArmed.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            installBottomBarRenderFilter(khomePageStateCls.getClassLoader());
+        } catch (Throwable t) {
+            api.error("khome: render filter unavailable", t);
+        }
+        final Class<?> stateCls = khomePageStateCls;
+        int hooked = 0;
+        for (final java.lang.reflect.Constructor<?> ctor : stateCls.getDeclaredConstructors()) {
+            try {
+                ctor.setAccessible(true);
+                api.addHookCtor("khome: tab state ctor", ctor, new XposedInterface.Hooker() {
+                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        Object result = chain.proceed();
+                        try {
+                            filterKhomeTabList(result);
+                        } catch (Throwable t) {
+                            api.error("khome: filter failed", t);
+                        }
+                        return result;
+                    }
+                });
+                hooked++;
+            } catch (Throwable t) {
+                api.error("khome: hook state ctor failed", t);
+            }
+        }
+        api.info("khome: filter armed on " + stateCls.getName() + ", ctors=" + hooked);
+    }
+
+    /** 按 KC1.d.b（tab 路由名）过滤底栏列表；命中替换字段为新 List。 */
+    private void filterKhomeTabList(Object state) throws Exception {
+        Field lf = khomeTabListField;
+        Field nf = khomeItemNameField;
+        if (lf == null || nf == null || state == null
+                || !khomePageStateCls.isInstance(state)) {
+            return;
+        }
+        Object lv = lf.get(state);
+        if (!(lv instanceof List) || ((List<?>) lv).isEmpty()) {
+            return;
+        }
+        boolean rmMsg = api.isHomeTabbarRemoveMessage();
+        // 注意：「我的」不做数据级删除（删数据会连 pager 页一起丢，头像真实派发就没了），
+        // 它在底栏渲染参数处隐藏（见 installBottomBarRenderFilter）。
+        List<?> list = (List<?>) lv;
+        ArrayList<Object> kept = new ArrayList<Object>();
+        int rmMsgN = 0;
+        int mineIdx = -1;
+        for (int i = 0; i < list.size(); i++) {
+            Object item = list.get(i);
+            Object rawName = nf.get(item);
+            String name = rawName instanceof String ? ((String) rawName).toLowerCase() : "";
+            boolean dropMsg = rmMsg && (name.contains("im") || name.contains("message") || name.contains("msg"));
+            if (dropMsg) {
+                rmMsgN++;
+                continue;
+            }
+            if (name.contains("mine") || name.contains("user_center")) {
+                mineIdx = kept.size();
+            }
+            kept.add(item);
+        }
+        if (rmMsgN > 0) {
+            api.info("khome: bottom tab data filtered " + list.size() + "->" + kept.size()
+                    + " droppedMsg=" + rmMsgN);
+            lf.set(state, kept);
+        }
+        if (kept.size() > 0 && mineIdx >= 0) {
+            keptTabCount = kept.size();
+            mineSlotIndex = mineIdx;
+            mineTabKept = true;
+        }
+    }
+
+    // ===== 底栏渲染级隐藏「我的」（数据保留，头像真实派发可用）=====
+
+    private final AtomicBoolean renderFilterLogged = new AtomicBoolean(false);
+
+    /**
+     * 底栏渲染隐藏：HomeBottomTabContainerKt（dex 名 bottomtab.g）的容器 Compose 函数
+     * a(11参, p1=List tabs, p9=Composer, p10=int)。BEFORE 把 List 参数换成去掉「我的」
+     * 的副本——只影响画出来的 tab，数据列表/pager 里「我的」页原样保留，头像
+     * dispatchMineTabSelect(w0(FC1.c(mineSlotIndex))) 照常打开完整页。
+     * 若被删项恰是选中项（头像刚派发过），用 KC1.d 自家 copy 工厂
+     * d.a(item,null,null,true,false,65519) 克隆首项置选中，避免底栏无高亮。
+     */
+    private void installBottomBarRenderFilter(ClassLoader loader) throws Throwable {
+        Class<?> g = api.load(loader, "tv.danmaku.bili.khome.widget.bottomtab.g");
+        Method target = null;
+        for (Method mm : g.getDeclaredMethods()) {
+            Class<?>[] ps = mm.getParameterTypes();
+            if (ps.length == 11 && ps[1] == List.class
+                    && ps[9].getName().contains("Composer") && ps[10] == int.class) {
+                target = mm;
+                break;
+            }
+        }
+        if (target == null) {
+            api.error("khome: bottom tab container fn not found on " + g.getName(), null);
+            return;
+        }
+        api.deoptimize(target);
+        api.addHook("khome: bottom tab render", target, new XposedInterface.Hooker() {
+            @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                if (!api.isHomeTabbarRemoveMine()) {
+                    return chain.proceed();
+                }
+                try {
+                    Object listObj = chain.getArg(1);
+                    if (!(listObj instanceof List) || ((List<?>) listObj).isEmpty()) {
+                        return chain.proceed();
+                    }
+                    List<?> list = (List<?>) listObj;
+                    int mineIdx = -1;
+                    for (int i = 0; i < list.size(); i++) {
+                        Object n = khomeItemNameField.get(list.get(i));
+                        if (n instanceof String && ((String) n).toLowerCase().contains("user_center")) {
+                            mineIdx = i;
+                            break;
+                        }
+                    }
+                    if (mineIdx < 0) {
+                        return chain.proceed();
+                    }
+                    ArrayList<Object> kept = new ArrayList<Object>(list);
+                    Object removed = kept.remove(mineIdx);
+                    // 选中位修补：被隐藏项是选中项 → 克隆首项置选中（只用副本，不动共享对象）
+                    if (kept.size() > 0 && isItemSelectorTrue(removed)) {
+                        Object clone = cloneItem(kept.get(0), true);
+                        if (clone != null) {
+                            kept.set(0, clone);
+                        }
+                    }
+                    keptTabCount = kept.size();
+                    if (renderFilterLogged.compareAndSet(false, true)) {
+                        api.info("khome: render hides mine tab (bar " + list.size() + "->" + kept.size()
+                                + ", data keeps " + mineSlotIndex + ")");
+                    }
+                    java.util.List<Object> args = chain.getArgs();
+                    Object[] newArgs = args.toArray();
+                    newArgs[1] = kept;
+                    return chain.proceed(newArgs);
+                } catch (Throwable t) {
+                    api.error("khome: render filter failed", t);
+                    return chain.proceed();
+                }
+            }
+        });
+        api.info("khome: render filter hook ok -> " + g.getName() + "." + target.getName());
+    }
+
+    private boolean isItemSelectorTrue(Object item) {
+        try {
+            for (Field f : item.getClass().getDeclaredFields()) {
+                if (f.getType() == boolean.class
+                        && !java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                    f.setAccessible(true);
+                    if (f.getBoolean(item)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    /** KC1.d copy 工厂 d.a(item,null,null,selected,false,65519)（形状匹配，失败返回 null）。 */
+    private Object cloneItem(Object item, boolean selected) {
+        try {
+            for (Method mm : item.getClass().getDeclaredMethods()) {
+                Class<?>[] ps = mm.getParameterTypes();
+                if (!java.lang.reflect.Modifier.isStatic(mm.getModifiers())
+                        || ps.length != 6 || ps[0] != item.getClass()
+                        || ps[3] != boolean.class || ps[4] != boolean.class || ps[5] != int.class) {
+                    continue;
+                }
+                mm.setAccessible(true);
+                return mm.invoke(null, item, null, null, selected, false, 65519);
+            }
+        } catch (Throwable t) {
+            api.warn("khome: clone item failed: " + t);
+        }
+        return null;
     }
 
     // ===== 顶栏消息角标（未读数红点）=====

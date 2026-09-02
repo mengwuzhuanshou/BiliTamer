@@ -181,6 +181,10 @@ def main(proj):
             "exported": True,
             "launcher": True,
             "module_settings": True,
+        }, {
+            "name": pkg + ".ui.FeedTagSettingsActivity",
+            "label": label,
+            "exported": False,
         }],
         meta_datas=([] if libxposed else [
             ("xposedmodule", ("bool", True)),

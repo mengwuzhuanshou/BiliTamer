@@ -86,4 +86,7 @@ public interface HookApi {
     boolean isShareQqEnabled();
 
     boolean isVerboseLoggingEnabled();
+
+    /** 首页推荐分区屏蔽词表（逗号分隔原串；未配置返回空串）。 */
+    String getFeedBlockedTnames();
 }
