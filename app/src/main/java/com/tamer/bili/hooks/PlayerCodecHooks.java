@@ -7,31 +7,40 @@ import java.util.List;
 import io.github.libxposed.api.XposedInterface;
 
 /**
- * 播放器解码（HEVC / AV1）与音质（Hi-Res 无损 / 杜比全景声 / AAC）选择。
+ * 播放器解码（HEVC / AV1 / H264）与音质（Hi-Res 无损 / 杜比全景声 / AAC）选择。
  *
- * 解码自动顺位按设备硬解能力过滤<b>请求位</b>（CodecCapability，v1.6.1 黑屏修复）：
- * 设备没有硬件解码器的编码不写入 fnval，服务端即不下发对应流。**只过滤请求，
- * 不替换解码**——自动时的顺位选择仍完全交给原逻辑在实发流集合上自行回退，
- * 锁定项是用户显式选择也不过滤（仅告警）。
+ * 解码控制按设备硬解能力过滤<b>请求位</b>（CodecCapability，v1.6.1 引入、v1.7.1
+ * 修复生效）：fnval 的 AV1/HEVC 位必须<b>显式按设置置位与清位</b>——B 站自身
+ * （GI1.e.c()）会按自家能力检测（乐观判断，OEM 解码器运行时可失败）预先置好
+ * AV1/HEVC 位，只 OR 不清位等于不过滤（v1.6.1 黑屏未修复根因，v1.7.1 起自动
+ * 顺位+硬解过滤会把设备解不了的编码位从 fnval 中移除，服务端即不下发对应流）。
+ * 各档位语义：自动=按硬解能力请求；锁定 HEVC/AV1/H264=只保留对应位（H264 锁定
+ * 即清掉 AV1/HEVC/H266 位，只请求 H264）；关闭=不触碰解码位（纯 App 行为）。
+ * 只过滤请求、不替换解码——自动时的顺位选择仍完全交给原逻辑在实发流集合上
+ * 自行回退，锁定项是用户显式选择也不过滤（仅告警）。
  *
  * 6.3.0 落点：
- *  - fnval 位控制服务端下发哪些格式的流。hook FG1.b 的 fnval 计算（int c() 与 long d()）
- *    按设置强制开启对应位，服务端才会下发 HEVC/AV1/Dolby 流。
- *  - 视频解码偏好：GeminiCommonResolverParams.c() 返回 VideoCodecType（其 y 字段为
- *    codecid：7=AVC, 12=HEVC, 13=AV1）。hook 该方法实现顺位/锁定。
+ *  - fnval 位控制服务端下发哪些格式的流。hook FG1.b 的 fnval 计算（int c() 与
+ *    long d()）；6.4.0 类迁到 GI1.e（方法名 c/d 未变，9100300 实测）。
+ *  - 视频解码偏好：GeminiCommonResolverParams.c() 返回 VideoCodecType（codecid
+ *    字段 7=AVC, 12=HEVC, 13=AV1；字段名 6.3.0 为 y、6.4.0 漂移为 z，按序探测）。
+ *    hook 该方法实现顺位/锁定。
  *  - 音质顺位：MediaResource.I(int,int) 构建 IjkMediaAsset 时选择默认音轨 id。
  *    杜比(DOLBY) 与 Hi-Res(HIRES) 音频流以 AudioEnhancementResource 挂在
  *    mediaResource.l / mediaResource.m。hook I() 把默认音轨指到顺位首个可用项。
  */
 public final class PlayerCodecHooks {
 
-    // fnval 位定义（B 站播放器共用约定）
-    private static final int FNVAL_DASH  = 0x10;      // 16
-    private static final int FNVAL_DOLBY = 0x80;      // 128  Dolby 音频
-    private static final int FNVAL_AV1   = 0x200;     // 512  AV1 视频
-    private static final int FNVAL_H265  = 0x10000;   // 65536 HEVC 相关位
+    // fnval 位定义（B 站播放器共用约定；9100300 GI1.e.c() 实测核对）
+    private static final int FNVAL_DASH  = 0x10;       // 16
     private static final int FNVAL_HDR   = 0x40;       // 64    HDR
+    private static final int FNVAL_DOLBY = 0x80;       // 128   Dolby 音频
+    private static final int FNVAL_AV1   = 0x200;      // 512   AV1 视频
+    private static final int FNVAL_AV1_SOFT = 0x800;   // 2048  AV1 软解支持位（与 AV1 位联动置/清）
+    private static final int FNVAL_LOSSLESS = 0x1000;  // 4096  Hi-Res 无损音频
     private static final int FNVAL_HDR_VIVID = 0x4000; // 16384 HDR Vivid
+    private static final int FNVAL_H265  = 0x10000;    // 65536 HEVC/H266 相关位（9100300 中
+                                                       // H266 realtime 逻辑与 HEVC 共用此位）
 
     // 服务端 codecid：7=AVC(H264) 12=HEVC(H265) 13=AV1 14=H266
     private static final int CODECID_AVC  = 7;
@@ -152,110 +161,178 @@ public final class PlayerCodecHooks {
         api.info("codec: fnval hook ok -> " + fnvalClsUsed + ".c()/d()");
     }
 
-    /** 自动顺位：仅请求设备能硬解的编码位（都无硬解=仅 H264，不替换解码）；锁定：只开对应位。 */
+    /**
+     * int fnval 位改写（v1.7.1 重写）。
+     *
+     * <b>黑屏修复要点</b>：B 站自身 fnval 计算（9100300 为 GI1.e.c()）会按自家
+     * 能力检测预先置 AV1(0x200)/AV1软解(0x800)/HEVC·H266(0x10000) 位；v1.6.1 及
+     * 之前只在原值上 OR 加位、从不清位，自家已置的位永远留着——过滤形同虚设，
+     * OEM 硬解运行时失败的流照样下发，黑屏依旧。这里改为<b>先按设置显式清位
+     * 再置位</b>：关闭/锁 H264/自动无硬解时把对应位从请求中移除，服务端才真
+     * 的不下发。其余位（4K/帧率/平台等）不动。
+     *
+     * 档位：codec 0=自动(硬解过滤) 1=锁 HEVC 2=锁 AV1 3=锁 H264 4=关闭(不干预)；
+     * hdr 0=自动 1=锁 HDR 2=锁 Vivid 3=强制关 4=关闭(不干预)；
+     * audio 0/4=不干预音质位 2=锁杜比 3=锁无损（无损含杜比位）。
+     */
     private int applyFnvalBits(int v) {
         int nv = v | FNVAL_DASH;
         int codec = api.getCodecMode();
         int audio = api.getAudioQuality();
         int hdr = api.getHdrMode();
-        // HDR 位：自动顺位按设备能力（原逻辑已按 z5/z6 决定），锁定/关闭时强制
-        if (hdr == 1) {            // 锁定 HDR（不含 Vivid）
-            nv |= FNVAL_HDR;
-            nv &= ~FNVAL_HDR_VIVID;
-        } else if (hdr == 2) {     // 锁定 HDR Vivid（含 HDR 基础位）
-            nv |= FNVAL_HDR | FNVAL_HDR_VIVID;
-        } else if (hdr == 3) {     // 关闭 HDR
-            nv &= ~(FNVAL_HDR | FNVAL_HDR_VIVID);
-        }
+
+        // ---- 解码位：先清后设（清位是 v1.7.1 修复核心）----
+        int av1Bits = FNVAL_AV1 | FNVAL_AV1_SOFT;
         switch (codec) {
             case 1: // 锁定 HEVC（用户显式选择，不过滤，只提示风险）
                 warnLockedNoHwOnce("HEVC", CodecCapability.hwHevc());
+                nv &= ~av1Bits;
                 nv |= FNVAL_H265;
                 break;
             case 2: // 锁定 AV1
                 warnLockedNoHwOnce("AV1", CodecCapability.hwAv1());
-                nv |= FNVAL_AV1;
+                nv &= ~FNVAL_H265;
+                nv |= av1Bits;
                 break;
-            default: // 自动顺位：无硬解的编码不向服务端请求（黑屏修复 v1.6.1）
+            case 3: // 锁定 H264：只请求 H264（清 AV1/HEVC/H266 全部高位）
+                nv &= ~(av1Bits | FNVAL_H265);
+                break;
+            case 4: // 关闭：解码位完全交给 App 原逻辑，不触碰
+                break;
+            default: // 0 自动顺位：无硬解的编码不向服务端请求（黑屏修复）
                 boolean hevcHw = CodecCapability.hwHevc();
                 boolean av1Hw = CodecCapability.hwAv1();
                 logHwCapOnce(hevcHw, av1Hw);
                 if (api.isCodecHwFilterEnabled()) {
-                    if (av1Hw) nv |= FNVAL_AV1;
-                    if (hevcHw) nv |= FNVAL_H265;
+                    // 有硬解的编码保留/置位，没有的清掉（顺位择优交给 App 原逻辑）
+                    if (av1Hw) { nv |= av1Bits; } else { nv &= ~av1Bits; }
+                    if (hevcHw) { nv |= FNVAL_H265; } else { nv &= ~FNVAL_H265; }
                 } else {
-                    nv |= FNVAL_AV1 | FNVAL_H265;
+                    // 过滤关闭=旧行为：AV1/HEVC 都请求
+                    nv |= av1Bits | FNVAL_H265;
                 }
                 break;
         }
+        // ---- HDR 位 ----
+        switch (hdr) {
+            case 1: // 锁定 HDR（不含 Vivid）
+                nv |= FNVAL_HDR;
+                nv &= ~FNVAL_HDR_VIVID;
+                break;
+            case 2: // 锁定 HDR Vivid（含 HDR 基础位）
+                nv |= FNVAL_HDR | FNVAL_HDR_VIVID;
+                break;
+            case 3: // 强制关闭 HDR
+                nv &= ~(FNVAL_HDR | FNVAL_HDR_VIVID);
+                break;
+            default: // 0 自动 / 4 关闭：不触碰 HDR 位（App 原逻辑已按设备能力决定）
+                break;
+        }
+        // ---- 音质位 ----
         switch (audio) {
-            case 2: // 杜比全景声
+            case 2: // 锁定杜比全景声
+                nv &= ~FNVAL_LOSSLESS;
                 nv |= FNVAL_DOLBY;
                 break;
-            case 3: // Hi-Res 无损
-                nv |= FNVAL_DOLBY | 0x1000; // Dolby + 无损位(0x1000)
+            case 3: // 锁定 Hi-Res 无损（含杜比位）
+                nv |= FNVAL_DOLBY | FNVAL_LOSSLESS;
                 break;
-            default: // 自动顺位：杜比优先，其次无损
-                nv |= FNVAL_DOLBY | 0x1000;
+            default: // 0 自动 / 4 关闭：不触碰音质位
                 break;
         }
         return nv;
     }
 
+    /**
+     * long soft_fnval 位改写。9100300 GI1.e.d() 位表：bit0=AV1 软解支持、
+     * bit1=HEVC/H266 软解支持。与 int fnval 同策略：先清后设，关闭=不触碰。
+     */
     private long applySoftFnvalBits(long v) {
         long nv = v;
         int codec = api.getCodecMode();
-        if (codec == 1) {
-            nv |= FNVAL_H265;
+        if (codec == 3) {          // 锁 H264：清软解请求位
+            return nv & ~(1L | 2L);
+        }
+        if (codec == 4) {          // 关闭：不干预
             return nv;
         }
-        if (codec == 2) {
-            nv |= FNVAL_AV1;
-            return nv;
+        if (codec == 1) {          // 锁 HEVC
+            return (nv & ~1L) | 2L;
+        }
+        if (codec == 2) {          // 锁 AV1
+            return (nv & ~2L) | 1L;
         }
         if (!api.isCodecHwFilterEnabled()) {
-            nv |= FNVAL_AV1 | FNVAL_H265;
-            return nv;
+            return nv | 1L | 2L;   // 过滤关闭=旧行为
         }
-        if (CodecCapability.hwAv1()) nv |= FNVAL_AV1;
-        if (CodecCapability.hwHevc()) nv |= FNVAL_H265;
-        return nv;
+        // 自动：按硬解能力置位（无硬解则清掉对应软解位）
+        long av1 = CodecCapability.hwAv1() ? 1L : 0L;
+        long hevc = CodecCapability.hwHevc() ? 2L : 0L;
+        return (nv & ~(1L | 2L)) | av1 | hevc;
     }
 
-    /** hook GeminiCommonResolverParams.c()：返回 VideoCodecType，实现顺位/锁定。 */
+    /**
+     * hook GeminiCommonResolverParams.c()：返回 VideoCodecType，实现锁定。
+     * 自动/关闭档位不干预（硬解过滤只在 fnval 请求位做，不替换解码选择）。
+     */
     private void installCodecPreference() throws Throwable {
         final Class<?> params = api.load(cl, "com.bilibili.app.gemini.base.player.GeminiCommonResolverParams");
         final Class<?> vct = api.load(cl, "tv.danmaku.ijk.media.player.IjkMediaAsset$VideoCodecType");
         final Object av1 = enumValue(vct, "AV1");
         final Object h265 = enumValue(vct, "H265");
         final Object h264 = enumValue(vct, "H264");
-        final Object unknown = enumValue(vct, "UNKNOWN");
-        final Field yField = api.declaredField(params, "y");
+        // codecid 字段名漂移：6.3.0 为 y，6.4.0(9100300) 实测漂移为 z（y 变常量 2）。
+        // 按序探测，谁在取谁；都拿不到则锁定模式退化为不干预（fnval 位仍是主机制）。
+        final Field codecidField = declaredFieldTry(params, "z", "y");
+        if (codecidField == null) {
+            api.warn("codec: codecid field not found (z/y) — preference lock degraded");
+        }
         final Method c = api.declaredMethod(params, "c");
         api.deoptimize(c);
         api.addHook("codec: preference", c, new XposedInterface.Hooker() {
             @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                 int codec = api.getCodecMode();
-                if (codec == 0) return chain.proceed(); // 自动：交给原逻辑（硬解过滤只在请求位做，不替换解码）
+                if (codec == 0 || codec == 4) return chain.proceed(); // 自动/关闭：交给原逻辑
                 Object thiz = chain.getThisObject();
                 if (thiz == null) return chain.proceed();
-                Object cur = yField.get(thiz);
-                int curCodec = cur instanceof Integer ? ((Integer) cur).intValue() : 0;
+                int curCodec = 0;
+                if (codecidField != null) {
+                    try {
+                        Object cur = codecidField.get(thiz);
+                        curCodec = cur instanceof Integer ? ((Integer) cur).intValue() : 0;
+                    } catch (Throwable ignored) {
+                    }
+                }
                 Object result = chain.proceed();
-                if (codec == 2 && av1 != null && curCodec == CODECID_AV1) {
-                    return av1;
-                } else if (codec == 1 && h265 != null && curCodec == CODECID_HEVC) {
-                    return h265;
+                if (codec == 3 && h264 != null) {
+                    // 锁 H264：实发流是 H264 时确认返回 H264（与 fnval 清位互补）
+                    if (curCodec == CODECID_AVC) {
+                        return h264;
+                    }
                 } else if (codec == 2 && av1 != null) {
-                    // 锁定 AV1：结果若不是 AV1 且原 codecid 是 AV1 已处理；这里是兜底
-                    return av1;
+                    if (curCodec == CODECID_AV1) {
+                        return av1;
+                    }
                 } else if (codec == 1 && h265 != null) {
-                    return h265;
+                    if (curCodec == CODECID_HEVC) {
+                        return h265;
+                    }
                 }
                 return result;
             }
         });
         api.info("codec: codec preference hook ok -> GeminiCommonResolverParams.c()");
+    }
+
+    /** 按序探测声明字段（混淆名跨构建漂移兜底），全部缺失返回 null。 */
+    private Field declaredFieldTry(Class<?> cls, String... names) {
+        for (int i = 0; i < names.length; i++) {
+            try {
+                return api.declaredField(cls, names[i]);
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
     }
 
     private void logHwCapOnce(boolean hevcHw, boolean av1Hw) {
@@ -283,7 +360,7 @@ public final class PlayerCodecHooks {
         api.addHook("codec: audio default", m, new XposedInterface.Hooker() {
             @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                 int audio = api.getAudioQuality();
-                if (audio == 0) return chain.proceed(); // 自动：保守不干预
+                if (audio == 0 || audio == 4) return chain.proceed(); // 自动/关闭：不干预
                 Object thiz = chain.getThisObject();
                 if (thiz == null) return chain.proceed();
                 Object arg0 = chain.getArg(0);

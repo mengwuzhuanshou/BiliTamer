@@ -76,14 +76,33 @@ public class SettingsActivity extends Activity {
 
         section("播放器", "Player");
         addRadio(BiliConfig.KEY_CODEC, "视频解码格式", "Video codec",
-                new String[]{"顺位 Auto (AV1>HEVC>H264)", "锁定 HEVC (H.265)", "锁定 AV1"},
-                new int[]{0, 1, 2},
+                new String[]{"顺位 Auto (AV1>HEVC>H264)", "锁定 HEVC (H.265)", "锁定 AV1",
+                             "锁定 H264 (H.264)", "关闭（不干预解码）"},
+                new int[]{0, 1, 2, 3, 4},
                 "顺位：优先 AV1，服务端没有 AV1 就 HEVC，都没有才用 H264；\n"
-                + "锁定：只使用指定编码（该编码不可用时回退到默认 H264）");
+                + "锁定：只请求指定编码（服务端没有时回退默认流）；\n"
+                + "锁 H264 兼容性最好（黑屏/解码失败可试此项）；\n"
+                + "关闭=模块完全不碰解码请求，纯 App 原行为");
         addSwitch(BiliConfig.KEY_CODEC_HW_FILTER, "按硬解能力自动过滤 HEVC/AV1", "HW-decode auto filter",
                 "自动顺位下，设备没有硬件解码器的编码不再向服务端请求，\n"
                 + "规避软解失败导致的随机黑屏（有声无画面）。\n"
                 + "锁定 HEVC/AV1 不受此开关影响；改后需强停 B 站重开");
+        addRadio(BiliConfig.KEY_AUDIO_QUALITY, "音质选项", "Audio quality",
+                new String[]{"顺位 Auto (杜比>无损>AAC)", "锁定 AAC", "锁定杜比全景声",
+                             "锁定 Hi-Res 无损", "关闭（不干预音质）"},
+                new int[]{0, 1, 2, 3, 4},
+                "顺位：优先杜比全景声，没有就 Hi-Res 无损，再没有才 AAC；\n"
+                + "锁定：只用指定音质（不可用时回退 AAC）；\n"
+                + "关闭=模块完全不碰音质请求与音轨选择；\n"
+                + "杜比/无损需大会员账号与服务端支持");
+        addRadio(BiliConfig.KEY_HDR, "HDR 画质", "HDR",
+                new String[]{"顺位 Auto (HDR Vivid>HDR>SDR)", "锁定 HDR", "锁定 HDR Vivid",
+                             "强制关闭 HDR", "关闭（不干预）"},
+                new int[]{0, 1, 2, 3, 4},
+                "顺位：设备支持 HDR 时自动开启（优先 HDR Vivid）；\n"
+                + "锁定/强制关闭：强制指定 HDR 模式；\n"
+                + "关闭=模块完全不碰 HDR 请求位，纯 App 原行为；\n"
+                + "需屏幕支持 HDR 才有实际效果");
 
         section("首页布局（国内版风格）", "Home layout (CN-style)");
         addSwitch(BiliConfig.KEY_HOME_TOPBAR_MSG_ICON, "顶栏搜索栏右侧加「消息」图标", "Topbar message icon",
@@ -100,16 +119,6 @@ public class SettingsActivity extends Activity {
         addSwitch(BiliConfig.KEY_HOME_TABBAR_RM_MINE, "底栏移除「我的」tab（实验）", "Remove mine tab (beta)",
                 "「我的」入口已上移到顶栏头像时从底栏隐藏该 tab（数据保留，\n"
                 + "头像点击仍可打开完整「我的」页）。仅适配 6.4.0；改后需强停");
-        addRadio(BiliConfig.KEY_AUDIO_QUALITY, "音质选项", "Audio quality",
-                new String[]{"顺位 Auto (杜比>无损>AAC)", "锁定 AAC", "锁定杜比全景声", "锁定 Hi-Res 无损"},
-                new int[]{0, 1, 2, 3},
-                "顺位：优先杜比全景声，没有就 Hi-Res 无损，再没有才 AAC；\n"
-                + "锁定：只用指定音质（不可用时回退 AAC）。杜比/无损需大会员账号与服务端支持");
-        addRadio(BiliConfig.KEY_HDR, "HDR 画质", "HDR",
-                new String[]{"顺位 Auto (HDR Vivid>HDR>SDR)", "锁定 HDR", "锁定 HDR Vivid", "关闭 HDR"},
-                new int[]{0, 1, 2, 3},
-                "顺位：设备支持 HDR 时自动开启（优先 HDR Vivid）；\n"
-                + "锁定/关闭：强制指定 HDR 模式。需屏幕支持 HDR 才有实际效果");
 
         section("听视频", "Listen mode");
         addSwitch(BiliConfig.KEY_LISTEN_PAUSE_AFTER_END, "听完此视频自动暂停", "Pause when current video ends",

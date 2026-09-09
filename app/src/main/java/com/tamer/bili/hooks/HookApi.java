@@ -47,13 +47,16 @@ public interface HookApi {
     /** 身份声明范围：BiliConfig.IP_SCOPE_GLOBAL=0 / IP_SCOPE_COMMENT=1。 */
     int getIpScopeMode();
 
+    /** 解码模式：0=自动(硬解过滤) 1=锁 HEVC 2=锁 AV1 3=锁 H264 4=关闭(不干预)。 */
     int getCodecMode();
 
-    /** 自动顺位下是否按设备硬解能力过滤 HEVC/AV1（默认开，v1.6.1 黑屏修复）。 */
+    /** 自动顺位下是否按设备硬解能力过滤 HEVC/AV1（默认开，v1.6.1 引入、v1.7.1 显式清位生效）。 */
     boolean isCodecHwFilterEnabled();
 
+    /** 音质模式：0=自动 1=AAC 2=杜比 3=Hi-Res 无损 4=关闭(不干预)。 */
     int getAudioQuality();
 
+    /** HDR 模式：0=自动 1=锁 HDR 2=锁 Vivid 3=强制关 4=关闭(不干预)。 */
     int getHdrMode();
 
     /** 顶栏搜索栏右侧加「消息」图标（默认开，6.4.0 锚点）。 */

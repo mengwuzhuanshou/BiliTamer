@@ -1,5 +1,33 @@
 # BiliTamer Release notes
 
+## v1.7.1
+
+* **修复：黑屏（有声无画面）过滤真正生效 / Fixed: HW-decode filter now actually takes
+  effect**: v1.6.1 引入的「按硬解能力过滤」此前只在服务端请求位上 OR 加位、从不清位，
+  而宿主 App 自身会按自家（乐观的）能力检测预先置好 AV1/HEVC 请求位——模块的过滤
+  对宿主已置的位形同虚设，设备硬解运行时失败的流照样下发，黑屏依旧。本版起 fnval 位
+  改写改为「先清后设」：自动顺位下设备没有硬解的编码位会被从请求中移除，服务端不再
+  下发对应流。这是黑屏反馈的核心修复。/ The hardware-decode filter added in v1.6.1
+  previously only OR-ed format bits into the request without ever clearing the bits the
+  host app had already set from its own (optimistic) capability detection, so streams
+  the device fails to hardware-decode at runtime were still delivered and black screens
+  persisted. fnval bit handling now explicitly clears and re-sets bits: in auto mode,
+  codecs the device cannot hardware-decode are removed from the request so the server
+  stops delivering them. This is the core black-screen fix.
+* **新增：锁定 H264 / New: lock to H.264**: 视频解码新增「锁定 H264」档位——只请求
+  H.264，清掉 AV1/HEVC/H266 请求位。兼容性最好的兜底档：解码异常、黑屏、卡顿的设备
+  可显式切到此档。/ New "Lock H.264" codec mode — requests H.264 only (AV1/HEVC/H266
+  bits cleared). Most-compatible fallback for devices that glitch on modern codecs.
+* **新增：解码/音质/HDR 均可完全关闭 / New: decode, audio and HDR can each be fully
+  off**: 三组新增「关闭（不干预）」档——模块完全不触碰对应的请求位与选择逻辑，纯
+  App 原行为，便于逐项排查是模块哪一路改动引发的问题。/ New "Off (no intervention)"
+  option for each of codec, audio quality and HDR: the module leaves the corresponding
+  request bits and selection logic completely untouched (pure app behaviour), useful
+  for isolating which module change causes an issue.
+* **音质/HDR 布局归位 / Audio & HDR moved under Player section**（设置页原误置于首页
+  布局段）。
+* 构建 / Build: versionCode 13。
+
 ## v1.7.0
 
 * **首页布局对齐国内版 / CN-style home layout (6.4.0)**:

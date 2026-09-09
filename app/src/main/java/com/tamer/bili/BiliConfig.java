@@ -31,10 +31,11 @@ public final class BiliConfig {
     public static final int IP_SCOPE_GLOBAL = 0;
     public static final int IP_SCOPE_COMMENT = 1;
 
-    // ===== 播放器解码：0=自动 1=HEVC 2=AV1 =====
+    // ===== 播放器解码：0=自动(硬解过滤) 1=锁定 HEVC 2=锁定 AV1 3=锁定 H264 4=关闭(不干预) =====
     public static final String KEY_CODEC = "codec_mode";
 
     // ===== 播放器硬解过滤：自动顺位下按设备硬解能力过滤 HEVC/AV1（默认开）=====
+    // v1.7.1 起过滤为「显式清位」：设备无硬解的编码位从 fnval 移除，服务端不下发。
     public static final String KEY_CODEC_HW_FILTER = "codec_hw_filter";
 
     // ===== 首页 UI 布局（国内版风格）：顶栏消息图标 / 头像=我的入口 / 底栏删 tab =====
@@ -44,10 +45,10 @@ public final class BiliConfig {
     public static final String KEY_HOME_TABBAR_RM_MINE = "home_tabbar_remove_mine";
     public static final String KEY_HOME_TOPBAR_MSG_BADGE = "home_topbar_message_badge";
 
-    // ===== 音质：0=默认 1=AAC 2=杜比全景声 3=Hi-Res 无损 =====
+    // ===== 音质：0=自动 1=AAC 2=杜比全景声 3=Hi-Res 无损 4=关闭(不干预) =====
     public static final String KEY_AUDIO_QUALITY = "audio_quality";
 
-    // ===== HDR：0=自动顺位 1=锁定 HDR 2=锁定 HDR Vivid 3=关闭 HDR =====
+    // ===== HDR：0=自动 1=锁定 HDR 2=锁定 HDR Vivid 3=强制关闭 4=关闭(不干预) =====
     public static final String KEY_HDR = "hdr_mode";
 
     // ===== 听视频（迷你播放器）：听完当前视频自动暂停 =====

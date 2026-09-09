@@ -24,9 +24,9 @@ An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`,
 | --- | --- | --- |
 | 评论/主页 IP 属地 IP location | 把请求身份改写为国内版客户端，服务端返回 location 字段，评论区「IP属地：」与主页 IP 标签随之显示 / Rewrite request identity to the domestic client so the server returns the location field (comment-area "IP location" and profile IP tag) | 开 on |
 | 身份声明范围 Identity scope | 评论区限定：仅评论/字幕请求声明国内版身份，其余请求保持国际版；或全局（旧行为）/ Scoped: declare the domestic identity for comment & subtitle requests only; or global (legacy behavior) | 评论区限定 scoped |
-| 解码顺位 Decoder preference | AV1 > HEVC > H264 自动顺位，或锁定某一种；自动顺位按设备硬解能力过滤请求位，不能硬解的编码不下发（只过滤请求，不替换解码）/ AV1 > HEVC > H264 auto preference, or lock one; auto mode drops codecs the device can't hardware-decode from the request (filter only, no substitution) | 自动 auto |
-| 音质顺位 Audio preference | 杜比全景声 > Hi-Res > AAC 自动顺位，或锁定 / Dolby > Hi-Res > AAC auto preference, or lock | 自动 auto |
-| HDR 画质顺位 HDR preference | HDR Vivid > HDR > SDR 自动顺位，或锁定/关闭 / HDR Vivid > HDR > SDR auto preference, or lock/disable | 自动 auto |
+| 解码顺位 Decoder preference | AV1 > HEVC > H264 自动顺位，或锁定某一种（含**锁定 H264** 兜底档），或**关闭（不干预）**；自动顺位按设备硬解能力过滤请求位（先清后设，宿主已置的位也会被移除），不能硬解的编码不下发（只过滤请求，不替换解码）/ AV1 > HEVC > H264 auto preference, or lock one (incl. **lock H264** fallback) or **off (untouched)**; auto mode explicitly clears + re-sets request bits by hw-decode capability (bits the host already set are also removed) so undecodable codecs aren't delivered (filter only, no substitution) | 自动 auto |
+| 音质顺位 Audio preference | 杜比全景声 > Hi-Res > AAC 自动顺位，或锁定，或**关闭（不干预）** / Dolby > Hi-Res > AAC auto preference, or lock, or **off (untouched)** | 自动 auto |
+| HDR 画质顺位 HDR preference | HDR Vivid > HDR > SDR 自动顺位，或锁定/强制关闭，或**关闭（不干预）** / HDR Vivid > HDR > SDR auto preference, or lock/force-off, or **off (untouched)** | 自动 auto |
 | 听视频听完暂停 Pause after video | 听视频（全屏音频播放器）播完当前视频即暂停，不自动连播（零监听实现）/ Pause when the current video ends in the listen-mode fullscreen audio player instead of auto-advancing (zero-listener implementation) | 关 off |
 | 隐藏互动提示 Hide interaction hints | 一键三连动画/文案、投票面板、UP 关注引导气泡 / Hide triple-action animation, vote panel and follow-bubble hints | 关 off |
 | 首页不自动刷新 No home auto-refresh | 从后台/其它页面切回首页时不自动重载推荐流；下拉/点 tab/首次进入不受影响 / Skip the automatic feed reload when returning to the home page; manual refresh unaffected | 关 off |
