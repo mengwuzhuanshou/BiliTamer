@@ -280,34 +280,47 @@ public final class HomeUxHooks {
             return;
         }
 
-        // 容器：叠在顶栏内容行之上。父容器 HomeAppBarLayout 是「垂直」LinearLayout，
-        // 直接 addView 会新开一行（实测）——用负 topMargin 把本层拉回到上一个子 View
-        // （折叠 ComposeView）的位置上，高度与其同步（净占位为 0，不撑高父容器）。
+        // 容器：叠在顶栏内容行之上。
+        //
+        // v1.7.2 修复（分区栏错位）：旧做法把 overlay 追加到 HomeAppBarLayout（垂直
+        // LinearLayout）末尾，再用负 topMargin=-childAt(0).height 把它「拉回」第一行。
+        // 该负 margin 技巧只在 overlay 恰好是内容行的紧邻下一个兄弟时成立；服务端下发
+        // 分区栏（推荐/动画）后兄弟布局流改变，负 margin 不再能把 overlay 精确拉回第一
+        // 行，结果头像入口/消息图标掉到分区栏那一行（头像本体仍在顶栏）。
+        //
+        // 新做法：把内容行（childAt(0)）用一个 FrameLayout 包裹，overlay 作为该 wrapper
+        // 的第二个子 View 与之同尺寸叠放。overlay 与内容行同处一个 FrameLayout，无论
+        // 服务端在 HomeAppBarLayout 里再插多少行（分区栏等）都不影响叠放关系，恒精确
+        // 覆盖顶栏内容行。wrapper 继承内容行原 LayoutParams（占位/高度不变，不撑高父容器）。
         final FrameLayout overlay = new FrameLayout(bar.getContext());
         overlay.setTag("bili_tamer_top_overlay");
         overlay.setClickable(false);
-        final android.widget.LinearLayout.LayoutParams overlayLp = new android.widget.LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0);
-        overlayLp.topMargin = 0;
-        barGroup.addView(overlay, barGroup.getChildCount(), overlayLp);
-        barGroup.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
-            @Override public void onLayoutChange(View v, int l, int t, int r, int b,
-                                                 int ol, int ot, int or2, int ob) {
-                try {
-                    if (barGroup.getChildCount() > 1) {
-                        int h = barGroup.getChildAt(0).getHeight();
-                        android.widget.LinearLayout.LayoutParams lp =
-                                (android.widget.LinearLayout.LayoutParams) overlay.getLayoutParams();
-                        if (lp != null && (lp.height != h || lp.topMargin != -h)) {
-                            lp.height = h;
-                            lp.topMargin = -h;
-                            overlay.setLayoutParams(lp);
-                        }
-                    }
-                } catch (Throwable ignored) {
-                }
+
+        View existingWrap = barGroup.findViewWithTag("bili_tamer_top_wrap");
+        if (existingWrap instanceof FrameLayout) {
+            // 防御：wrapper 已在（理论上不会，顶部已幂等拦截）——把 overlay 补进现有 wrapper。
+            ((FrameLayout) existingWrap).addView(overlay, new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        } else {
+            View contentRow = barGroup.getChildAt(0);
+            if (contentRow == null) {
+                api.warn("homeux: no content row (childAt(0)) in appbar, skip decorate");
+                return;
             }
-        });
+            final ViewGroup.LayoutParams contentLp = contentRow.getLayoutParams();
+            final FrameLayout wrap = new FrameLayout(bar.getContext());
+            wrap.setTag("bili_tamer_top_wrap");
+            wrap.setClickable(false);
+            barGroup.removeView(contentRow);
+            barGroup.addView(wrap, 0, contentLp); // wrapper 继承内容行原占位（高度/边距不变）
+            // 内容行放回 wrapper 时用 MATCH_PARENT 填满 wrapper（wrapper 高度=内容行原高度，
+            // 故内容行视觉尺寸不变）；overlay 同尺寸叠在其上，恒精确覆盖内容行。
+            ViewGroup.LayoutParams fill = new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+            wrap.addView(contentRow, fill);
+            wrap.addView(overlay, fill);
+            api.info("homeux: content row wrapped for stable overlay");
+        }
 
         if (avatarEntry) {
             View avatar = new View(bar.getContext());

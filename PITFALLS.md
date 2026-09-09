@@ -382,3 +382,22 @@ Activity 的 onCreate（冷）/onNewIntent（热）截获，解析后写入宿�
   （不强行替换——替换会把流类型与解码器选择错配，本身是黑屏源）。
 * **锚点漂移补记**：codecid 字段名 6.3.0 为 y、6.4.0 漂移为 z（y 在 6.4.0 变成
   常量 2）；按 z→y 序探测，全缺失则偏好 hook 退化为不干预（fnval 位仍是主机制）。
+
+## 27. 顶栏子项可被服务端动态插入：UI 叠层不得依赖容器位置假设（v1.7.2）
+
+* **现象**：6.4.0 顶栏「我的」入口与消息图标上线后，实机发现入口掉到了下面一行的
+  分区栏（「推荐/动画」类 tab 行）上。服务器在顶栏下方**下发**了新分区栏——App
+  版本未更新即生效，顶栏容器（垂直 LinearLayout）从单一内容行变成「内容行 + 分区栏」。
+* **根因**：v1.7.0 的叠层注入用「addView 追加到容器末尾 + 高度 0 + OnLayoutChangeListener
+  同步 topMargin=-h」做净零占位叠加。该写法依赖「容器只有一个子行且 overlay 紧跟其后」；
+  服务器插入分区栏后 overlay 变成末尾子项，负 margin 相对的是分区栏，入口随分区栏错位。
+  **任何「相对容器子项位置计算」的 UI 叠层都有同样脆弱性——宿主 UI 可以被服务端动态
+  改版，不需要 App 升级。**
+* **正解（v1.7.2）**：overlay 不追加到容器末尾，而是**把内容行（child 0）包进一个
+  FrameLayout wrapper**：wrapper 继承内容行原槽位与原 LayoutParams（含 weight），
+  overlay 作为 wrapper 的第二个子项（MATCH_PARENT/MATCH_PARENT 同尺寸、不可点击）。
+  overlay 恒与内容行同层叠放，服务器再往下插行也不影响；幂等按 overlay tag 递归查找，
+  命中旧 wrapper 时只往旧 wrapper 里补 overlay，不二次包裹。
+* **约束**：① wrapper 必须整体继承内容行原 LayoutParams，否则垂直容器行高变化；
+  ② wrapper 与 overlay 都不可拦截触摸；③ 幂等锚点用 wrapper 的 tag，重复 decorate
+  只补 overlay（双层包裹会留空行）。
