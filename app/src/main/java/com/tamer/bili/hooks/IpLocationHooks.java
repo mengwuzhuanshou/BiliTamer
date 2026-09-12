@@ -24,6 +24,10 @@ import io.github.libxposed.api.XposedInterface;
  *    mobiApp（android_i -> android_hd，含长度前缀重建）。
  *  - 旧 moss / REST 路径：mq0.a.e()(Metadata) / d()(Device) 生成身份头，经 okhttp
  *    Aq0.a 注入；同步改写。
+ * 6.4.0 / 6.5.0 漂移（见 installKmpHeaderValue / computeWantedService 候选表）：
+ *  提供者基类 up1.a -> kr1.a -> kr1.d；包装 jp1.c -> Zq1.c -> kr1.c；方法描述符
+ *  jp1.g -> Zq1.g -> kr1.g（字段语义 a=包名/b=服务名/c=方法名不变）。拦截器
+ *  kntr.base.moss.ignet.impl.header.b 与 MossInterceptor$e/grpc.c 为真名，跨版本稳定。
  */
 public final class IpLocationHooks {
     // 国内版评论客户端身份（与国内版 HD 一致）
@@ -82,6 +86,11 @@ public final class IpLocationHooks {
     private final AtomicBoolean probeCommon = new AtomicBoolean(false);
     private final AtomicBoolean probeIdp = new AtomicBoolean(false);
     private final AtomicBoolean probeRest = new AtomicBoolean(false);
+    private final AtomicBoolean probeGrpc = new AtomicBoolean(false);
+    private final AtomicBoolean probeGrpcEntry = new AtomicBoolean(false);
+
+    private final AtomicBoolean grpcWriteReady = new AtomicBoolean(false);
+    private final AtomicInteger grpcWriteAttempts = new AtomicInteger(0);
 
     private static final ThreadLocal<String> sScope = new ThreadLocal<String>();
     /** 评论区限定模式：moss-common-headers 拦截器在 proceed 前设置的本次 RPC 服务名。
@@ -109,6 +118,7 @@ public final class IpLocationHooks {
         installKmpHeaderValue();
         installRestParams();
         installCommonHeadersScope();
+        installGrpcBinHeaderWrite();
         api.info("IpLocationHooks installed");
     }
 
@@ -185,7 +195,7 @@ public final class IpLocationHooks {
         }
     }
 
-    /** KMP KMetadata/KDevice 头提供者：up1.a.a() 返回 jp1.c(key, byte[])。
+    /** KMP KMetadata/KDevice 头提供者：a() 返回头包装（String key + byte[] value）。
      *  这是评论 gRPC 的 x-bili-metadata-bin / x-bili-device-bin 实际来源。
      *  hook 后在返回的字节上改写 mobiApp（android_i -> android_hd）。 */
     private void installKmpHeaderValue() {
@@ -194,15 +204,21 @@ public final class IpLocationHooks {
             api.warn("ip: kmp header value give up after " + MAX_RETRY + " attempts");
             return;
         }
-        // 6.3.0: up1.a.a() -> jp1.c(key, byte[])；6.4.0: 基类 kr1.a.a() -> Zq1.c(key, byte[])
-        // （子类 nr1.a=KMetadata / mr1.a=KDevice，a() 为 final 基类方法，hook 一处覆盖两者）。
-        // hooker 按字段扫描 String key + byte[] value，对两种包装类通用。
+        // 提供者 hook 仅作为兜底（主改写点见 installCommonHeadersScope 的上下文头存储直改，
+        // 那条路全用真名类，跨版本稳定）。提供者基类随构建漂移（PITFALLS #3/#16）：
+        // 6.3.0=up1.a（具体类）；6.4.0=kr1.a（final a() 具体方法）；6.5.0 起变成接口
+        // kr1.d + 抽象中转 vr1.a + 5 个具体提供者，无单点可 hook，故 6.5.0 上本兜底
+        // 自然弃用（形状校验 + 抽象拒绝让它安静跳过）。6.5.0 的 up1.a 已被无关类占用，
+        // 仅凭方法名 a 会挂错类——必须过形状校验。
         Class<?> cls = null;
         String clsUsed = null;
-        for (String cn : new String[]{"up1.a", "kr1.a"}) {
+        for (String cn : new String[]{"kr1.a", "up1.a"}) {
             try {
                 Class<?> c = api.load(cl, cn);
-                api.declaredMethod(c, "a"); // 确认形状
+                if (!isHeaderProviderBase(c)) {
+                    api.debug("ip: kmp provider candidate " + cn + " shape mismatch, skip");
+                    continue;
+                }
                 cls = c;
                 clsUsed = cn;
                 break;
@@ -300,6 +316,29 @@ public final class IpLocationHooks {
         }
     }
 
+    /** 提供者基类形状校验：存在无参且非抽象的 a()，其返回类型带 (String, byte[]) 构造器
+     *  （= 头包装）。抽象 a() 不能 hook（6.5.0 kr1.d 变接口即此形态）；
+     *  单字母类名跨构建会撞名（6.5.0 up1.a 已被无关类占用），仅凭名字会把 hook
+     *  挂到不相关类上且静默无效。 */
+    private static boolean isHeaderProviderBase(Class<?> c) {
+        try {
+            for (Method mm : c.getDeclaredMethods()) {
+                if (!mm.getName().equals("a") || mm.getParameterTypes().length != 0) continue;
+                if (java.lang.reflect.Modifier.isAbstract(mm.getModifiers())) continue;
+                Class<?> rt = mm.getReturnType();
+                if (rt.isPrimitive() || rt.isArray() || rt == String.class) continue;
+                for (java.lang.reflect.Constructor<?> k : rt.getDeclaredConstructors()) {
+                    Class<?>[] ps = k.getParameterTypes();
+                    if (ps.length == 2 && ps[0] == String.class && ps[1] == byte[].class) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
     /** 评论区限定身份改写（v1.3，方向2 的正解）。
      *
      *  挂点：MossCommonHeadersProvider 拦截器（kntr.base.moss.ignet.impl.header.b，name=
@@ -332,12 +371,15 @@ public final class IpLocationHooks {
             api.deoptimize(m);
             api.addHook("ip: common headers scope", m, new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                    // up1.a.a() 在本拦截器内部被同步调用：proceed 前设标记，改写才能赶在发请求前
+                    // up1/kr1 提供者在原始 b() 体内被同步调用：proceed 前设 ThreadLocal 标记，
+                    // 供 grpc.c.f 改写点与 6.3.0/6.4.0 提供者兜底 hook 使用。
+                    // 注意：本 hook 的 pre-proceed 阶段跑在原始方法体（提供者写头）之前，
+                    // 此时上下文头存储还是空的——改写不能落在这里。
                     long n = mossRpcCount.incrementAndGet();
-                if (n % 200 == 1) {
-                    api.info("ip: moss rpc count=" + n);
-                }
-                String want = computeWantedService(chain.getArg(0));
+                    if (n % 200 == 1) {
+                        api.info("ip: moss rpc count=" + n);
+                    }
+                    String want = computeWantedService(chain.getArg(0));
                     String old = sCommonScope.get();
                     if (want != null) sCommonScope.set(want);
                     try {
@@ -362,6 +404,96 @@ public final class IpLocationHooks {
         }
     }
 
+    /** 6.5.0 主改写路径：hook kntr.base.moss.ignet.impl.grpc.c.f(String, byte[])。
+     *  header.b.b() 原始方法体内，每个二进制提供者产出头包装后经 ctx.f(key, bytes)
+     *  写入存储（grpc.d），然后才 proceed 发请求——f 是二进制头入存储的唯一入口，
+     *  参数替换即等于改写请求头，时序必然赶得上。类为真名，6.3.0-6.5.0 未漂移。
+     *  （6.5.0 起提供者层变为接口 kr1.d + 5 个具体类，无单点可 hook，此层是正解。） */
+    private void installGrpcBinHeaderWrite() {
+        if (grpcWriteReady.get()) return;
+        if (grpcWriteAttempts.incrementAndGet() > MAX_RETRY) {
+            api.warn("ip: grpc bin header write give up after " + MAX_RETRY + " attempts");
+            return;
+        }
+        final Class<?> grpcC;
+        final Method f;
+        try {
+            grpcC = api.load(cl, "kntr.base.moss.ignet.impl.grpc.c");
+            Method found = null;
+            for (Method mm : grpcC.getDeclaredMethods()) {
+                if (!mm.getName().equals("f")) continue;
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length == 2 && ps[0] == String.class && ps[1] == byte[].class) {
+                    found = mm;
+                    break;
+                }
+            }
+            if (found == null) {
+                throw new NoSuchMethodException("grpc.c.f(String,byte[]) not found");
+            }
+            f = found;
+        } catch (ClassNotFoundException e) {
+            api.debug("ip: grpc.c not loaded yet, retry in " + RETRY_DELAY_MS + "ms");
+            retry(new Runnable() {
+                @Override public void run() {
+                    installGrpcBinHeaderWrite();
+                }
+            });
+            return;
+        } catch (Throwable t) {
+            api.error("ip: grpc bin header write resolve failed", t);
+            return;
+        }
+        try {
+            api.deoptimize(f);
+            api.addHook("ip: grpc bin header write", f, new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object k = chain.getArg(0);
+                    if (!(k instanceof String)) return chain.proceed();
+                    String key = (String) k;
+                    if (!"x-bili-metadata-bin".equals(key)
+                            && !"x-bili-device-bin".equals(key)) return chain.proceed();
+                    if (!api.isIpLocationEnabled()) return chain.proceed();
+                    if (api.getIpScopeMode() == BiliConfig.IP_SCOPE_COMMENT) {
+                        // 评论区限定：仅头 scope 标记在身的请求；空间页 moss 通道走 UI 时间窗
+                        if (sCommonScope.get() == null) {
+                            if (System.currentTimeMillis() >= sUiSpaceUntil) return chain.proceed();
+                        }
+                    }
+                    Object v = chain.getArg(1);
+                    if (!(v instanceof byte[])) return chain.proceed();
+                    if (probeGrpcEntry.compareAndSet(false, true)) {
+                        api.info("ip: grpc write fired key=" + key + " bytes=" + ((byte[]) v).length
+                                + " scope=" + sCommonScope.get());
+                    }
+                    byte[] out = rewriteMobiAppBytes((byte[]) v);
+                    if (out == null) return chain.proceed();
+                    if (api.isVerboseLoggingEnabled()) {
+                        api.info("ip: grpc bin header rewritten: " + key
+                                + " (" + ((byte[]) v).length + " -> " + out.length + " bytes)");
+                    } else {
+                        logRewrite(probeGrpc, "grpc " + key + " 改写生效");
+                    }
+                    return chain.proceed(new Object[]{key, out});
+                }
+            });
+            grpcWriteReady.set(true);
+            api.info("ip: grpc bin header write hook ok -> kntr.base.moss.ignet.impl.grpc.c.f");
+        } catch (Throwable t) {
+            api.error("ip: grpc bin header write hook failed", t);
+        }
+    }
+
+    /** 解析 chain（MossInterceptor$b）上的 grpc 上下文：a() 返回 MossInterceptor$e，
+     *  其实现（grpc.c）即持有描述符与头存储的同一实例。 */
+    private static Object resolveCtx(Object chainObj) {
+        if (chainObj == null) return null;
+        Object ctx = callNoArg(chainObj, "a", "MossInterceptor$e");
+        if (ctx == null) ctx = callNoArg(chainObj, "a", "ignet.impl.grpc.c");
+        if (ctx == null) ctx = fieldInHierarchy(chainObj, "a");
+        return ctx;
+    }
+
     /** 判定本次 RPC 是否需要改写身份：需要则返回服务名（作 ThreadLocal 标记），否则 null。
      *  在 chain.proceed() 之前调用；改写本身由 up1.a.a() hook 完成。 */
     private String computeWantedService(Object chainObj) {
@@ -370,18 +502,18 @@ public final class IpLocationHooks {
             if (api.getIpScopeMode() != BiliConfig.IP_SCOPE_COMMENT) return null;
             boolean ip = api.isIpLocationEnabled();
             if (!ip) return null;
-            // chain -> grpc.c 上下文（MossInterceptor.b.a()）
-            Object ctx = callNoArg(chainObj, "a", "MossInterceptor$e");
-            if (ctx == null) ctx = callNoArg(chainObj, "a", "ignet.impl.grpc.c");
-            if (ctx == null) ctx = fieldInHierarchy(chainObj, "a");
+            // chain -> grpc.c 上下文（MossInterceptor$b.a()）
+            Object ctx = resolveCtx(chainObj);
             if (ctx == null) {
                 logRewriteOnce("ctx", "ip: common headers ctx not found (chain=" + chainObj.getClass().getName() + ")");
                 return null;
             }
-            Object g = fieldTypedInHierarchy(ctx, "b", "Zq1.g");
-            if (g == null) g = fieldTypedInHierarchy(ctx, "b", "jp1.g");
-            // 6.3.0 jp1.g：service 在字段 a；6.4.0 Zq1.g(KMethodDescriptor)：
-            // a=packageName, b=serviceName, c=methodName —— 两者都试，取像服务名的那个
+            // 方法描述符随构建漂移：6.3.0=jp1.g / 6.4.0=Zq1.g / 6.5.0=kr1.g。
+            // 字段语义一致（a=packageName, b=serviceName, c=methodName，kr1.g 经
+            // KMethodDescriptor toString 实证），故只按类型名提示逐一尝试。
+            Object g = fieldTypedAnyHint(ctx, "b", new String[]{"kr1.g", "Zq1.g", "jp1.g"});
+            // 6.3.0 jp1.g：service 在字段 a；6.4.0/6.5.0：a=packageName, b=serviceName，
+            // c=methodName —— 语义移位过，两个都试，取像服务名的那个
             String svc = g == null ? null : strField(g, "b");
             String method = g == null ? null : strField(g, "c");
             if (!isReplyService(svc)) {
@@ -389,9 +521,8 @@ public final class IpLocationHooks {
                 if (isReplyService(alt)) svc = alt;
             }
             if (svc == null) {
-                // 兜底：k 也有服务名字段
-                Object k = fieldTypedInHierarchy(ctx, "a", "Zq1.k");
-                if (k == null) k = fieldTypedInHierarchy(ctx, "a", "jp1.k");
+                // 兜底：k 也有服务名字段（6.3.0=jp1.k / 6.4.0=Zq1.k / 6.5.0=kr1.k）
+                Object k = fieldTypedAnyHint(ctx, "a", new String[]{"kr1.k", "Zq1.k", "jp1.k"});
                 svc = k == null ? null : strField(k, "a");
             }
             if (svc == null && g != null) {
@@ -453,6 +584,15 @@ public final class IpLocationHooks {
 
     private static Object fieldInHierarchy(Object obj, String name) {
         return fieldTypedInHierarchy(obj, name, null);
+    }
+
+    /** 按字段名 + 多个类型名提示（跨版本候选）依次查找字段值。 */
+    private static Object fieldTypedAnyHint(Object obj, String name, String[] typeHints) {
+        for (String hint : typeHints) {
+            Object v = fieldTypedInHierarchy(obj, name, hint);
+            if (v != null) return v;
+        }
+        return null;
     }
 
     /** 单个二进制身份头的改写（android_i -> android，长度前缀重建）。返回是否改写。 */

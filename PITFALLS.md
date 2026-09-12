@@ -234,26 +234,31 @@ LINE/FACEBOOK 等国际社媒）。渠道项的图标与文案在应用内**硬�
   `ffp_set_playback_rate`），即 Zygisk 原生模块——超出本项目 libxposed Java 架构。
   **结论：>3 档位均为观感 placebo；如需诚实菜单，注入阶梯应收在 3.0。**
 
-## 16. 6.4.0 混淆漂移总表与候选并存策略
+## 16. 混淆漂移总表（6.3.0/6.4.0/6.5.0）与候选并存策略
 
-6.4.0 对身份链/播放器/参数注入做了大规模换名。所有 hook 采用**候选列表**：
-6.3.0 旧锚点在前（主），6.4.0 新锚点在后（辅），按序解析、解析到即停——
-两个版本共用同一 APK。实测漂移（6.3.0 → 6.4.0）：
+6.4.0 对身份链/播放器/参数注入做了大规模换名；6.5.0 又把身份链整组重排了一遍。
+所有 hook 采用**候选列表**：旧锚点在前为主，新锚点在后为辅，按序解析、解析到即停——
+多个版本共用同一 APK。实测漂移：
 
-| 作用 | 6.3.0 | 6.4.0 | 备注 |
-| --- | --- | --- | --- |
-| KMP 身份头提供者 | `up1.a.a()` | `kr1.a.a()` | 6.4.0 变为抽象基类，`a()` 为 final，子类只覆写 `b()` |
-| moss RPC 上下文 descriptor | `jp1.g`（字段 a/b） | `Zq1.g`（字段 a=包名,b=服务名,c=方法名） | **字段语义移位**：取服务名要读字段 b |
-| metadata/device proto | `Metadata`/`Device` | `KMetadata`/`com.bilibili.metadata.device.KDevice` | kotlinx protobuf 生成类换名 |
-| okhttp 身份提供者 | `mq0.a.e()/d()` | `oq0.a.e()/d()` | 6.4.0 实际零触发（okhttp REST 层闲置） |
-| 空间页 REST 参数注入 | `XA0.a` | `com.bilibili.app.comm.list.common.api.e` | 见 #5 更新 |
-| fnval 改写 | `FG1.b.c()/d()` | `GI1.e.c()/d()` | 方法名未变 |
-| 首页 feed 加载 | `PegasusViewModel.z0` | `PegasusViewModel.y0` | 结构化匹配（第 3 参类型）跨版本通用 |
-| 听模式完成入口 | mini-player biz 层 | 播放器核心 `RI1.l.onCompletion` | 见 #17 |
-| 空间页 Activity | `ui.AuthorSpaceActivity` | `local.LocalAuthorSpaceActivity` | 6.4.0 用户实际打开的是 local 变体 |
+| 作用 | 6.3.0 | 6.4.0 | 6.5.0 | 备注 |
+| --- | --- | --- | --- | --- |
+| 二进制身份头提供者 | `up1.a.a()`（具体类） | `kr1.a.a()`（抽象基类，`a()` 为 final 具体方法） | 接口 `kr1.d` + 抽象 `vr1.a` + 5 个具体子类 | **6.5.0 无单点可 hook**——改走 grpc.c.f（见 #28） |
+| moss RPC 上下文 descriptor | `jp1.g` | `Zq1.g`（a=包名,b=服务名,c=方法名） | `kr1.g`（字段语义不变，`toString` 可实证） | 取服务名读字段 b |
+| 头包装（key+bytes） | `jp1.c` | `Zq1.c` | `kr1.c` | String+byte[] 构造器形状稳定，可作校验依据 |
+| moss 服务名持有 | `jp1.k` | `Zq1.k` | `kr1.k` | 字段 a=服务名 |
+| 拦截器/上下文/存储 | `kntr.base.moss.ignet.impl.header.b` / `MossInterceptor$e` / `ignet.impl.grpc.c`/`d` | 同左 | 同左 | **真名类，三版未动**——锚点尽量落这里 |
+| metadata/device proto | `Metadata`/`Device` | `KMetadata`/`KDevice` | 同 6.4.0（真名仍在；`getMobiApp()` 仍返回 String） | kotlinx protobuf 生成类 |
+| okhttp 身份提供者 | `mq0.a.e()/d()` | `oq0.a.e()/d()` | 无（两候选均不存在） | okhttp REST 层闲置 |
+| 空间页 REST 参数注入 | `XA0.a` | `com.bilibili.app.comm.list.common.api.e` | 同 6.4.0（真名未变） | 见 #5 更新 |
+| 评论区 moss 服务 | `bilibili.main.community.reply.v1` | 同左 | **主列表走 `reply.v2`**（v1 仍在） | 判定用 `startsWith("bilibili.main.community.reply")` |
+| fnval 改写 | `FG1.b.c()/d()` | `GI1.e.c()/d()` | 未重验 | 方法名未变 |
+| 首页 feed 加载 | `PegasusViewModel.z0` | `PegasusViewModel.y0` | 未重验 | 结构化匹配（第 3 参类型）跨版本通用 |
+| 听模式完成入口 | mini-player biz 层 | 播放器核心 `RI1.l.onCompletion` | 未重验 | 见 #17 |
+| 空间页 Activity | `ui.AuthorSpaceActivity` | `local.LocalAuthorSpaceActivity` | 同 6.4.0 | |
 
 **教训**：升级后先跑一轮“探针版”（只加日志不动行为），用日志确认新链路再落改写；
-旧锚点不要删——它们是回退 6.3.0 的依据。
+旧锚点不要删——它们是回退旧版的依据。找提供者类新组名的捷径：真名类
+`MossInterceptor$e` 的字段类型直接暴露当前组名（6.5.0 字段 b=`Lkr1/g;`）。
 
 ## 17. 听模式（全屏音频播放器）的完成入口与“播完暂停”的正确姿势
 
@@ -401,3 +406,30 @@ Activity 的 onCreate（冷）/onNewIntent（热）截获，解析后写入宿�
 * **约束**：① wrapper 必须整体继承内容行原 LayoutParams，否则垂直容器行高变化；
   ② wrapper 与 overlay 都不可拦截触摸；③ 幂等锚点用 wrapper 的 tag，重复 decorate
   只补 overlay（双层包裹会留空行）。
+
+## 28. 身份链失效排查：先查宿主是否悄悄升了版本 + 两类新坑（v1.7.3）
+
+* **现象**：评论区 IP 属地失效，用户侧「App 没更新」。实测装机包已自动升到 6.5.0
+  （`dumpsys package` 的 versionCode/lastUpdateTime 是唯一真相），混淆锚点整组漂移，
+  hook 静默失效——与服务器下发无关。**失效排查第一步永远是查装机版本。**
+* **坑一：单字母类名跨构建撞名 + 弱形状校验 = hook 挂在无关类上且「成功」**。
+  6.5.0 里 6.3.0 锚点 `up1.a` 被一个完全无关的类占用（返回动态/proto 类型），
+  旧校验「类存在且有名为 a 的方法」照样通过，hook 安装成功但永不命中。
+  候选列表的形状校验必须收紧到「无参且**非抽象**的方法 + 返回类型带 (String, byte[])
+  构造器」级别，名字候选只是索引不是证据。
+* **坑二：hook 包装方法的 pre-proceed 阶段 ≠ 方法体内联。** 头提供者的调用发生在
+  `header.b.b()` 的**原始方法体内部**，本 hook 的 pre-proceed 代码跑在它之前——
+  此时上下文头存储还是空的（日志实锤 `binHeaders=[]`）。想要「拦住写入存储的那一下」，
+  正确锚点是存储写入入口本身：`kntr.base.moss.ignet.impl.grpc.c.f(String, byte[])`
+  （二进制头唯一写入口，真名类 6.3.0-6.5.0 未漂移），AFTER 语义用
+  `chain.proceed(new Object[]{key, rewrittenBytes})` 做参数替换。
+* **6.5.0 提供者层结构**：单点 hook 彻底消失——接口 `kr1.d`（`a()` 返回包装）+
+  抽象中转 `vr1.a`（持有 header key 字符串）+ 5 个具体子类。枚举接口实现无反射通路，
+  逐个 hook 具体子类则下个版本必漂——**主改写点必须上移到真名类**（grpc.c.f），
+  提供者 hook 只留作旧版本兜底。
+* **找新组名的捷径**：真名基类 `MossInterceptor$e` 的字段类型直接暴露当前混淆组
+  （6.5.0 字段 b=`Lkr1/g;` → descriptor/包装/服务全在 kr1 组）；descriptor 的
+  kotlinx `toString()` 会打印全部字段语义（`KMethodDescriptor(packageName=…)`），
+  字段语义核对不需要反编译调用方。
+* **验证闭环**：armed 行（svc 判定）→ grpc write fired（key+scope）→ 改写生效探针 →
+  截图看评论区属地渲染，四段缺一不可。

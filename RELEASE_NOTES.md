@@ -1,5 +1,30 @@
 # BiliTamer Release notes
 
+## v1.7.3
+
+* **适配 6.5.0：评论区/主页 IP 属地修复 / 6.5.0 support: comment & profile IP location
+  fixed**: 宿主 App 自动升级 6.5.0 后身份链混淆锚点整组漂移，评论区 IP 属地失效
+  （6.3.0 的 `up1.a` 在 6.5.0 已被无关类占用，旧 hook 挂在不相关类上静默失效）。
+  本版把身份改写主路径上移到真名类 `kntr.base.moss.ignet.impl.grpc.c.f`（二进制身份头
+  写入存储的唯一入口，6.3.0–6.5.0 均未漂移），对 `x-bili-metadata-bin` /
+  `x-bili-device-bin` 做参数替换改写；6.3.0/6.4.0 的提供者层 hook 保留为兜底并新增
+  严格形状校验（无参非抽象方法 + (String, byte[]) 构造器返回形状），杜绝撞名挂错。
+  实机 6.5.0 验证：评论区属地（省份标签）恢复显示，非评论请求零改写。/ After the host
+  app auto-updated to 6.5.0, the obfuscated identity-chain anchors drifted again (the
+  6.3.0 `up1.a` name is now held by an unrelated class, so the old hook attached to the
+  wrong class and silently died). The main rewrite path now hooks the stable,
+  real-named `kntr.base.moss.ignet.impl.grpc.c.f` — the single entry through which
+  binary identity headers enter the request context — and swaps the
+  `x-bili-metadata-bin` / `x-bili-device-bin` bytes via argument replacement. The
+  6.3.0/6.4.0 provider-level hooks remain as fallbacks, now with strict shape
+  validation (non-abstract no-arg method + (String, byte[]) constructor on the return
+  type) so name collisions can never attach a dead hook. Verified on a 6.5.0 device:
+  province tags are back in the comment section; non-comment requests stay untouched.
+* **说明 / Note**: 6.5.0 评论区主服务已迁移至 `bilibili.main.community.reply.v2`，
+  服务名前缀判定天然覆盖。/ The 6.5.0 comment section mainly calls
+  `bilibili.main.community.reply.v2`; the service-name prefix check covers it.
+* 构建 / Build: versionCode 15。
+
 ## v1.7.2
 
 * **修复：顶栏入口随服务器新增分区栏错位 / Fixed: top-bar entries misaligning after

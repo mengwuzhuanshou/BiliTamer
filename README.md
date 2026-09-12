@@ -13,8 +13,8 @@
 > Not affiliated with Bilibili Inc.; trademarks and copyrights belong to their owners.
 > For learning and research on Android hooking techniques only.
 
-面向**国际版哔哩哔哩** `com.bilibili.app.in`（实测适配 **6.3.0 / 6.4.0**）的 LSPosed 模块。
-An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`, tested against **6.3.0 / 6.4.0**).
+面向**国际版哔哩哔哩** `com.bilibili.app.in`（实测适配 **6.3.0 / 6.4.0 / 6.5.0**）的 LSPosed 模块。
+An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`, tested against **6.3.0 / 6.4.0 / 6.5.0**).
 
 ---
 
@@ -43,7 +43,7 @@ Every switch is independently reversible; the master switch disables the whole m
 ## 环境要求 / Requirements
 
 * 已 root 的 Android 设备：Magisk 或 KernelSU + Zygisk + LSPosed / rooted device with Zygisk + LSPosed;
-* 国际版哔哩哔哩 6.3.0 / 6.4.0（com.bilibili.app.in）/ international Bilibili 6.3.0 / 6.4.0.
+* 国际版哔哩哔哩 6.3.0 / 6.4.0 / 6.5.0（com.bilibili.app.in）/ international Bilibili 6.3.0 / 6.4.0 / 6.5.0.
 
 ## 使用方法 / Installation
 
@@ -55,13 +55,18 @@ Every switch is independently reversible; the master switch disables the whole m
 ### 实现要点 / How the identity rewrite works
 
 * 评论/字幕走 KMP moss gRPC：拦截图库「moss-common-headers」拦截器取 service/method，
-  proceed 前打 ThreadLocal 标记，身份头提供者按标记把
+  proceed 前打 ThreadLocal 标记；6.5.0 起主改写点为真名类 grpc 上下文的二进制头写入口
+  `kntr.base.moss.ignet.impl.grpc.c.f`（参数替换），把
   `x-bili-metadata-bin`/`x-bili-device-bin` 里 mobiApp 字节从 `android_i` 改为 `android`
-  （protobuf 变长长度前缀同步重建）。6.3.0 锚点 `up1.a.a()`、6.4.0 锚点 `kr1.a.a()`
+  （protobuf 变长长度前缀同步重建）。旧版兜底：6.3.0 锚点 `up1.a.a()`、6.4.0 锚点
+  `kr1.a.a()`（均带严格形状校验）
   / Comment & subtitle RPCs are scoped via the moss-common-headers interceptor: before
-  `chain.proceed()` the service/method is read and a ThreadLocal marker set; the header
-  provider then rewrites the mobiApp protobuf bytes (`android_i` → `android`, rebuilding
-  the varint length prefix). 6.3.0 anchor `up1.a.a()`, 6.4.0 anchor `kr1.a.a()`;
+  `chain.proceed()` the service/method is read and a ThreadLocal marker set. Since 6.5.0
+  the main rewrite point is the stable, real-named binary-header write entry
+  `kntr.base.moss.ignet.impl.grpc.c.f` (argument replacement) which rewrites the mobiApp
+  protobuf bytes in `x-bili-metadata-bin`/`x-bili-device-bin` (`android_i` → `android`,
+  rebuilding the varint length prefix). Provider-level hooks for 6.3.0 (`up1.a.a()`) and
+  6.4.0 (`kr1.a.a()`) remain as fallbacks, now with strict shape validation;
 * 空间页走 REST：6.4.0 身份在 URL 参数里（`mobi_app=android_i`），hook 空间页 API 专属
   拦截器的 `addCommonParam` 改写之——天然按页面定域。6.3.0 锚点为 okretro 公共参数注入点
   `XA0.a` / Profile pages go through REST: on 6.4.0 the identity is a URL parameter
