@@ -1525,6 +1525,8 @@ public final class HomeUxHooks {
      * dispatchMineTabSelect(w0(FC1.c(mineSlotIndex))) 照常打开完整页。
      * 若被删项恰是选中项（头像刚派发过），用 KC1.d 自家 copy 工厂
      * d.a(item,null,null,true,false,65519) 克隆首项置选中，避免底栏无高亮。
+     * 仅适配 6.3.0/6.4.0：6.5.0 起容器 lambda 化且首帧即捕获 List，渲染级隐藏存在
+     * 首帧竞态，效果不可靠——新版上本 hook 不安装（「我的」tab 保持 App 默认显示）。
      */
     private void installBottomBarRenderFilter(ClassLoader loader) throws Throwable {
         Class<?> g = api.load(loader, "tv.danmaku.bili.khome.widget.bottomtab.g");
@@ -1538,7 +1540,9 @@ public final class HomeUxHooks {
             }
         }
         if (target == null) {
-            api.error("khome: bottom tab container fn not found on " + g.getName(), null);
+            api.warn("khome: bottom tab container fn (11-arg) not found on " + g.getName()
+                    + " -> render-level mine hide not effective on this version (6.5.0+"
+                    + " container is a compose lambda), skip; mine tab stays default-visible");
             return;
         }
         api.deoptimize(target);
@@ -1590,7 +1594,6 @@ public final class HomeUxHooks {
         });
         api.info("khome: render filter hook ok -> " + g.getName() + "." + target.getName());
     }
-
     private boolean isItemSelectorTrue(Object item) {
         try {
             for (Field f : item.getClass().getDeclaredFields()) {

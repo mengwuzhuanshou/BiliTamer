@@ -94,6 +94,9 @@ public final class ListenPauseHooks {
                     sb.append(mm.getName()).append("(").append(mm.getParameterTypes().length).append(")");
                     api.warn("listen:   " + sb.toString());
                 }
+                // biz 层全 miss（6.5.0 起）：仍要装播放器核心完成监听器（CE1.f/RI1.l，
+                // 听模式完成事件的唯一真实入口），不得在此提前 return
+                installAudioPlayerPause();
                 return;
             }
             for (Method t : targets) {
@@ -110,12 +113,33 @@ public final class ListenPauseHooks {
         }
     }
 
-    /** 6.4.0 主实现：全屏音频播放器（听模式）完成监听器 RI1.l.onCompletion。
-     *  实测 6.4.0 听模式完成事件只走这里（biz 层 b.l/Q1/广播器全部不触发）。
+    /** 播放器核心完成监听器：听模式完成事件只走这里（biz 层 b.l/Q1/广播器全部不触发）。
+     *  6.4.0: RI1.l（单字段 RI1.r 核心持有者）；6.5.0: CE1.f（R8 把完成/Info 两个监听器
+     *  横向合并成 (Object capture, int tag) 合成类，onCompletion(IMediaPlayer) 签名未变；
+     *  由播放器核心 vJ1.m 字段 H 注册，与 6.4.0 RI1.r 字段 H=RI1.l 槽位一一对应）。
      *  动作：反射调用播放器核心 pause() 并阻断转发（= 不自动切下一集）。 */
     private void installAudioPlayerPause() {
+        Class<?> c = null;
+        String anchorUsed = null;
+        for (String cn : new String[]{"RI1.l", "CE1.f"}) {
+            try {
+                Class<?> cand = api.load(cl, cn);
+                boolean shape = false;
+                for (Method mm : cand.getDeclaredMethods()) {
+                    if (!mm.getName().equals("onCompletion")) continue;
+                    Class<?>[] ps = mm.getParameterTypes();
+                    if (ps.length == 1 && ps[0].getName().endsWith("IMediaPlayer")) { shape = true; break; }
+                }
+                if (shape) { c = cand; anchorUsed = cn; break; }
+            } catch (Throwable next) {
+                // 下一候选
+            }
+        }
+        if (c == null) {
+            api.warn("listen: player-core completion listener not found (RI1.l / CE1.f)");
+            return;
+        }
         try {
-            final Class<?> c = api.load(cl, "RI1.l");
             Method oc = null;
             for (Method mm : c.getDeclaredMethods()) {
                 if (!mm.getName().equals("onCompletion")) continue;
@@ -123,7 +147,7 @@ public final class ListenPauseHooks {
                 if (ps.length == 1 && ps[0].getName().endsWith("IMediaPlayer")) { oc = mm; break; }
             }
             if (oc == null) {
-                api.warn("listen: RI1.l.onCompletion not found");
+                api.warn("listen: " + anchorUsed + ".onCompletion not found");
                 return;
             }
             api.deoptimize(oc);
@@ -173,9 +197,9 @@ public final class ListenPauseHooks {
                     return null;
                 }
             });
-            api.info("listen: audio player pause hook ok -> RI1.l.onCompletion");
+            api.info("listen: audio player pause hook ok -> " + anchorUsed + ".onCompletion");
         } catch (Throwable t) {
-            api.warn("listen: RI1.l hook failed: " + t);
+            api.warn("listen: " + anchorUsed + " hook failed: " + t);
         }
     }
 

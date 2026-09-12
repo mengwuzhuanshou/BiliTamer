@@ -255,6 +255,10 @@ LINE/FACEBOOK 等国际社媒）。渠道项的图标与文案在应用内**硬�
 | 首页 feed 加载 | `PegasusViewModel.z0` | `PegasusViewModel.y0` | 未重验 | 结构化匹配（第 3 参类型）跨版本通用 |
 | 听模式完成入口 | mini-player biz 层 | 播放器核心 `RI1.l.onCompletion` | 未重验 | 见 #17 |
 | 空间页 Activity | `ui.AuthorSpaceActivity` | `local.LocalAuthorSpaceActivity` | 同 6.4.0 | |
+| fnval 计算 | `FG1.b` | `GI1.e` | `kJ1.a` | 三类同构：单例 a、I 缓存 c、J 缓存 d、a()Z/b()Z、c()I/d()J（**private 实例方法**，dexscan 显示 direct≠static） |
+| 播放器核心完成监听器 | `RI1.l`（单字段 RI1.r） | 同左 | `CE1.f`（(Object,int) 合成类，R8 横向合并） | 核心容器：6.4.0 `RI1.r` ↔ 6.5.0 `vJ1.m`（字段 H 槽位一一对应，用 OnRawDataWriteListener 字段定位核心） |
+| 底栏容器 | `bottomtab.g.a`(11 参函数) | 同左 | `bottomtab.g` 变 Function2 lambda（List 在构造器 p1）+ 容器组合函数 `bottomtab.h.a` | item 级：`l.a`/`n.a`(I,oD1.d,...) |
+| 首页 tab 数据类 | `KC1.e`/`KC1.d` | 同左 | `oD1.e`/`oD1.d` | 形状锚定自动适配 ||
 
 **教训**：升级后先跑一轮“探针版”（只加日志不动行为），用日志确认新链路再落改写；
 旧锚点不要删——它们是回退旧版的依据。找提供者类新组名的捷径：真名类
@@ -433,3 +437,28 @@ Activity 的 onCreate（冷）/onNewIntent（热）截获，解析后写入宿�
   字段语义核对不需要反编译调用方。
 * **验证闭环**：armed 行（svc 判定）→ grpc write fired（key+scope）→ 改写生效探针 →
   截图看评论区属地渲染，四段缺一不可。
+
+## 29. 形状扫描找漂移锚点的实操（6.5.0 三连适配）
+
+* 6.5.0 适配用了三类「无名字依赖」扫描（工具在工作区 billibili/ 下，与 dexscan 同源）：
+  - **方法形状扫描**（scan_shape.py）：全 dex 找「声明了指定名字+返回类型+无参方法」的类。
+    定位 fnval 类 kJ1.a 的依据：与 6.4.0 GI1.e 逐字段同构（单例/I 缓存/J 缓存/两个懒加载
+    boolean/c()I/d()J），再 jadx 确认 c() 体内有 512/2048/65536 位运算。**坑**：
+    encoded_field/method 的 idx 是 uleb **差值**不是绝对值；dexscan 的 direct=static|private
+    混在一起，别按「direct 即 static」写过滤条件（GI1.e 的 c()/d() 是 private 实例方法）。
+  - **接口实现扫描**（scan_super.py）：按 interfaces/superclass 命中全部实现类。定位听模式
+    完成监听器：先扫 `IMediaPlayer$OnCompletionListener` 实现，再用「类有
+    OnRawDataWriteListener 类型字段」锁定播放器核心（6.4.0 RI1.r ↔ 6.5.0 vJ1.m），
+    核心字段表里对应槽位（H）就是完成监听器字段。R8 会把同宿主的多个单字段监听器
+    横向合并成 (Object capture, int tag) 合成类（RI1.l+RI1.m → CE1.f+CE1.g），签名不变
+    即可直接进候选。
+  - **方法参数类型扫描**：扫 method_ids 里参数含目标类的全部方法，定位消费方。
+    底栏渲染：6.5.0 的 `bottomtab.g` 从 11 参容器函数变成 Function2 lambda（List 在构造器
+    p1），真名嵌套类 `HomeBottomTabContainerKt$HomeBottomTabContainer$*` 和 item 级
+    `l.a/n.a(I,oD1.d,...)` 可交叉印证。
+* **Compose 渲染级过滤的固有竞态**：容器 lambda 在首帧组合时构造并捕获 tab List，
+  hook 链（500ms 轮询重试）可能晚于首帧——ctor 路径会输；invoke 路径只在父作用域
+  重组时触发，Compose 的 draw-phase 优化让「选中态切换」不重组容器。实测结论：
+  该渲染级隐藏在 6.5.0 不可靠，**已决定不适配**——原 11 参 hook 保留（6.3.0/6.4.0
+  专属），6.5.0 上找不到形状时打注记跳过（mine tab 保持默认显示，无害）。
+  验证「头像→我的」派发不受影响才是硬指标（6.5.0 实测完好）。

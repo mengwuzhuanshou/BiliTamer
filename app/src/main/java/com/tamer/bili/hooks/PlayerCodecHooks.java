@@ -92,12 +92,14 @@ public final class PlayerCodecHooks {
         void run() throws Throwable;
     }
 
-    /** hook 返回 fnval 的静态方法（int c() 与 long d()）。
-     *  6.3.0: FG1.b；6.4.0: 类迁到 gI1.e（方法名 c/d 未变）。 */
+    /** hook 返回 fnval 的类方法（int c() 与 long d()，direct private 实例方法，
+     *  经单例字段 a 调用）。6.3.0: FG1.b；6.4.0: GI1.e；6.5.0: kJ1.a——三类同构：
+     *  单例 a、I 缓存 c、J 缓存 d、a()Z/b()Z 懒加载能力位、c()I/d()J
+     *  （6.5.0 jadx 实证 c() 仍含 512/2048/65536 fnval 位运算）。 */
     private void installFnval() throws Throwable {
         Class<?> fg1b = null;
         String fnvalClsUsed = null;
-        for (String cn : new String[]{"FG1.b", "GI1.e"}) {
+        for (String cn : new String[]{"FG1.b", "GI1.e", "kJ1.a"}) {
             try {
                 Class<?> c = api.load(cl, cn);
                 boolean ok = true;
@@ -109,7 +111,7 @@ public final class PlayerCodecHooks {
             }
         }
         if (fg1b == null) {
-            api.warn("codec: fnval class not found (FG1.b / gI1.e)");
+            api.warn("codec: fnval class not found (FG1.b / GI1.e / kJ1.a)");
             return;
         }
         // int fnval
