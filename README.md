@@ -30,7 +30,6 @@ An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`,
 | 听视频听完暂停 Pause after video | 听视频（全屏音频播放器）播完当前视频即暂停，不自动连播（零监听实现）/ Pause when the current video ends in the listen-mode fullscreen audio player instead of auto-advancing (zero-listener implementation) | 关 off |
 | 隐藏互动提示 Hide interaction hints | 一键三连动画/文案、投票面板、UP 关注引导气泡 / Hide triple-action animation, vote panel and follow-bubble hints | 关 off |
 | 首页不自动刷新 No home auto-refresh | 从后台/其它页面切回首页时不自动重载推荐流；下拉/点 tab/首次进入不受影响 / Skip the automatic feed reload when returning to the home page; manual refresh unaffected | 关 off |
-| 分享到 QQ Share to QQ | 分享面板补回 QQ 渠道，点击走 B 站自带的 QQ 互联链路，弹出 QQ 分享面板选好友/群 / Restore the QQ channel in the share panel; tapping opens QQ's native share sheet (pick friends/groups) via the app's built-in QQ OpenSDK config | 6.3.0 开；6.4.0 自动不注入 |
 | 首页顶栏消息入口 Top-bar message entry | 顶栏搜索栏右侧加消息图标，未读红点带数字 / A message icon on the top bar with an unread numeric badge | 开 on（6.4.0） |
 | 首页头像→我的 Avatar as Mine entry | 顶栏头像点击经真实 tab 派发打开完整「我的」页 / Avatar tap opens the full Mine tab page | 开 on（6.4.0） |
 | 底栏删 tab Bottom-bar tabs | 移除「消息」tab、隐藏「我的」tab / Remove Message tab, hide Mine tab | 开 on（6.4.0） |
@@ -73,13 +72,6 @@ Every switch is independently reversible; the master switch disables the whole m
   (`mobi_app=android_i`), rewritten via the space-API-specific interceptor's
   `addCommonParam` — scoped to the space page by construction. The 6.3.0 anchor is the
   okretro common-param injection point `XA0.a`;
-* 分享到 QQ：国际版分享面板的渠道列表由服务端下发（不含 QQ），而客户端白名单、图标文案
-  与 QQ 互联配置（`assets/share_config.json` 的 qq.appId + tauth SDK + QQAssistActivity）
-  原生齐全——向渠道 bean 的 getter 注入 share_channel="QQ" 条目（与微信同排）即可复用
-  完整原生链路 / The intl share panel's channels are server-driven (no QQ), yet the client
-  whitelist, icons and the QQ OpenSDK config are all present natively — injecting a
-  share_channel="QQ" item into the channel bean's getter (same row as WeChat) restores the
-  full native flow;
 * 只重写 `android_i`→`android`，不触碰 android_hd；心跳/播放等其它服务保持国际版身份
   （日志可验证：每条改写行伴随同线程 armed 行）/ Heartbeats and other services keep the
   international identity — every rewrite line is paired with a same-thread "armed" line in the log;

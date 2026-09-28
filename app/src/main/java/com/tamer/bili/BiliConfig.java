@@ -14,7 +14,15 @@ public final class BiliConfig {
     public static final String MODULE_PKG = "com.tamer.bili";
     public static final String PREFS_NAME = "bili_tamer_config";
     public static final String TARGET_PKG = "com.bilibili.app.in";
+    /** 国内版宿主：仅侦查/探针通路验证用（媒体栈与国际版同源），功能 hook 不承诺适配。 */
+    public static final String DOMESTIC_PKG = "tv.danmaku.bili";
     public static final String WEB_PROCESS = "com.bilibili.app.in:web";
+    /** 离线下载进程（OkDown/VideoDownloadService 所在，manifest android:process=":download" 实测）。 */
+    public static final String DOWNLOAD_PROCESS = "com.bilibili.app.in:download";
+
+    public static boolean isBiliHost(String pkg) {
+        return TARGET_PKG.equals(pkg) || DOMESTIC_PKG.equals(pkg);
+    }
     public static final String CONF_NAME = "bili_tamer.conf";
     /** 实际生效的配置来源（日志排查用） */
     public static volatile String sConfSource = "defaults";
@@ -51,6 +59,18 @@ public final class BiliConfig {
     // ===== HDR：0=自动 1=锁定 HDR 2=锁定 HDR Vivid 3=强制关闭 4=关闭(不干预) =====
     public static final String KEY_HDR = "hdr_mode";
 
+    // ===== 下载加速（实验）：回环代理 + 多 CDN 多 Range 并发 + 共享块缓存 =====
+    // 默认必须关（探针/实验特性，未过真机全链路验证前不得随 release 出厂生效）。
+    public static final String KEY_ACCEL = "accel_enabled";
+    /** 单流并发子块数（1..64，越界回默认 8）。 */
+    public static final String KEY_ACCEL_CONCURRENCY = "accel_concurrency";
+    /** 块缓存目录配额（MB，64..65536，越界回默认 2048）。 */
+    public static final String KEY_ACCEL_CACHE_MB = "accel_cache_mb";
+    /** 节点池：0=主国内地 1=海外 2=自定义（对齐 CdnResolver.MODE_*）。 */
+    public static final String KEY_ACCEL_MODE = "accel_mode";
+    /** 自定义节点列表（逗号分隔 host；仅 mode=2 生效）。 */
+    public static final String KEY_ACCEL_CUSTOM_HOSTS = "accel_custom_hosts";
+
     // ===== 听视频（迷你播放器）：听完当前视频自动暂停 =====
     public static final String KEY_LISTEN_PAUSE_AFTER_END = "listen_pause_after_end";
 
@@ -61,7 +81,7 @@ public final class BiliConfig {
 
     // ===== 首页不自动刷新 =====
     public static final String KEY_NO_AUTO_REFRESH = "no_auto_refresh";
-    public static final String KEY_SHARE_QQ = "share_qq";           // 分享面板补回分享到 QQ
+    public static final String KEY_LIVE_BG_UNLOCK = "live_bg_unlock";          // 直播后台播放入口解锁
 
     // ===== 首页推荐分区屏蔽：tname 词表（逗号分隔存储；唯一字符串键）=====
     public static final String KEY_FEED_BLOCK_TNAMES = "feed_blocked_tnames";
@@ -69,6 +89,8 @@ public final class BiliConfig {
     // ===== 调试 =====
     public static final String KEY_DEBUG_ALIVE = "debug_alive_marker";
     public static final String KEY_VERBOSE = "verbose_log";
+    /** 侦查探针（仅日志零干预）：播放器 setDataSource / okhttp / 下载栈类加载观测。 */
+    public static final String KEY_PROBE = "probe_enabled";
     /** 开发兜底开关：只被 v1.0 式本地 conf 文件识别；置 true 时该文件覆盖远程配置。 */
     public static final String KEY_DEV_OVERRIDE = "dev_override";
 
@@ -81,6 +103,11 @@ public final class BiliConfig {
         KEY_CODEC_HW_FILTER,
         KEY_AUDIO_QUALITY,
         KEY_HDR,
+        KEY_ACCEL,
+        KEY_ACCEL_CONCURRENCY,
+        KEY_ACCEL_CACHE_MB,
+        KEY_ACCEL_MODE,
+        KEY_ACCEL_CUSTOM_HOSTS,
         KEY_HOME_TOPBAR_MSG_ICON,
         KEY_HOME_TOPBAR_MSG_BADGE,
         KEY_HOME_AVATAR_MINE_ENTRY,
@@ -92,9 +119,10 @@ public final class BiliConfig {
         KEY_HIDE_VOTE,
         KEY_HIDE_UP_PROMPT,
         KEY_NO_AUTO_REFRESH,
-        KEY_SHARE_QQ,
+        KEY_LIVE_BG_UNLOCK,
         KEY_DEBUG_ALIVE,
         KEY_VERBOSE,
+        KEY_PROBE,
     };
 
     /** 默认值表：与 SettingsActivity 保持一致 */
@@ -112,9 +140,11 @@ public final class BiliConfig {
         if (KEY_HIDE_UP_PROMPT.equals(key)) return false;
         if (KEY_DEBUG_ALIVE.equals(key)) return false;
         if (KEY_VERBOSE.equals(key)) return false;
+        if (KEY_PROBE.equals(key)) return false;
         if (KEY_NO_AUTO_REFRESH.equals(key)) return false;
+        if (KEY_LIVE_BG_UNLOCK.equals(key)) return true;      // 直播后台播放入口解锁，出厂默认开
+        if (KEY_ACCEL.equals(key)) return false; // 实验特性出厂默认关（硬约束）
         if (KEY_LISTEN_PAUSE_AFTER_END.equals(key)) return false;
-        if (KEY_SHARE_QQ.equals(key)) return true;      // 分享到 QQ 出厂默认开
         return false;
     }
 
@@ -123,6 +153,8 @@ public final class BiliConfig {
         if (KEY_AUDIO_QUALITY.equals(key)) return 0;
         if (KEY_HDR.equals(key)) return 0;
         if (KEY_IP_SCOPE.equals(key)) return IP_SCOPE_COMMENT; // v1.3 起默认评论区限定
+        if (KEY_ACCEL_CONCURRENCY.equals(key)) return 8;
+        if (KEY_ACCEL_CACHE_MB.equals(key)) return 2048;
         return 0;
     }
 
@@ -262,9 +294,11 @@ public final class BiliConfig {
                     continue; // 未知键跳过（严格解析：假阳性教训）
                 }
                 if (KEY_CODEC.equals(k) || KEY_AUDIO_QUALITY.equals(k)
-                        || KEY_HDR.equals(k) || KEY_IP_SCOPE.equals(k)) {
+                        || KEY_HDR.equals(k) || KEY_IP_SCOPE.equals(k)
+                        || KEY_ACCEL_CONCURRENCY.equals(k) || KEY_ACCEL_CACHE_MB.equals(k)
+                        || KEY_ACCEL_MODE.equals(k)) {
                     try { m.put(k, Integer.valueOf(v)); } catch (Throwable ignored2) {}
-                } else if (KEY_FEED_BLOCK_TNAMES.equals(k)) {
+                } else if (KEY_FEED_BLOCK_TNAMES.equals(k) || KEY_ACCEL_CUSTOM_HOSTS.equals(k)) {
                     m.put(k, v);
                 } else if ("true".equals(v) || "false".equals(v)) {
                     m.put(k, Boolean.valueOf("true".equals(v)));

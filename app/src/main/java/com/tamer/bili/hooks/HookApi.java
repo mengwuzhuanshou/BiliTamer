@@ -16,6 +16,17 @@ public interface HookApi {
     /** 构造器 hook（目标类未覆写目标方法时的兜底，如 HomeAppBarLayout 顶栏注入）。 */
     void addHookCtor(String name, java.lang.reflect.Constructor<?> ctor, XposedInterface.Hooker hooker);
 
+    /** 纯观测回调：只看到调用现场（对象+参数），永不改变行为。 */
+    interface CallObserver {
+        void onCall(Object thisObject, Object[] args);
+    }
+
+    /**
+     * 按「类+方法名」批量挂纯观测 hook（全部重载、含父类声明链）。
+     * 侦查探针专用：单条 hook 失败只记日志，不影响其余。
+     */
+    void addHookSimple(String name, Class<?> target, String methodName, CallObserver observer);
+
     void debug(String msg);
 
     void info(String msg);
@@ -59,6 +70,21 @@ public interface HookApi {
     /** HDR 模式：0=自动 1=锁 HDR 2=锁 Vivid 3=强制关 4=关闭(不干预)。 */
     int getHdrMode();
 
+    /** 下载加速总开关（实验特性，出厂默认关）。 */
+    boolean isAccelEnabled();
+
+    /** 单流并发子块数（默认 8；越界由 AccelHooks 夹回）。 */
+    int getAccelConcurrency();
+
+    /** 共享块缓存配额（MB，默认 2048）。 */
+    int getAccelCacheMb();
+
+    /** CDN 节点池模式：0=主国内地 1=海外 2=自定义（对齐 CdnResolver.MODE_*）。 */
+    int getAccelMode();
+
+    /** 自定义 CDN 节点列表（逗号分隔 host；仅 accel_mode=2 生效；未配置返回空串）。 */
+    String getAccelCustomHosts();
+
     /** 顶栏搜索栏右侧加「消息」图标（默认开，6.4.0 锚点）。 */
     boolean isHomeTopbarMessageIcon();
 
@@ -84,11 +110,14 @@ public interface HookApi {
 
     /** 首页不自动刷新开关。 */
     boolean isNoAutoRefreshEnabled();
+    boolean isLiveBgUnlockEnabled();
 
     /** 分享面板「分享到 QQ」开关。 */
-    boolean isShareQqEnabled();
 
     boolean isVerboseLoggingEnabled();
+
+    /** 侦查探针开关（仅开发/侦查构建使用，日志零干预）。 */
+    boolean isProbeEnabled();
 
     /** 首页推荐分区屏蔽词表（逗号分隔原串；未配置返回空串）。 */
     String getFeedBlockedTnames();

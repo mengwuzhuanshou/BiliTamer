@@ -2,8 +2,8 @@
 """BiliTamer 构建配置（供共享构建引擎 builder.py 读取）。"""
 MODULE = {
     "package": "com.tamer.bili",
-    "version_name": "1.7.3",
-    "version_code": 15,
+    "version_name": "1.7.11",
+    "version_code": 23,
     "app_label": u"B站国际版增强 BiliTamer",
     "xposed_description": u"国际版哔哩哔哩 (com.bilibili.app.in 6.3.0/6.4.0/6.5.0) 增强：评论区/主页 IP 属地、HEVC/AV1/H264 解码（顺位/锁定/关闭）、Hi-Res/杜比/AAC 音质（顺位/锁定/关闭）、HDR 控制、隐藏视频内互动提示",
     "xposed_scope": "com.bilibili.app.in",

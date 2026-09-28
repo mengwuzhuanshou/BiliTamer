@@ -37,9 +37,13 @@ final class ConfSync {
         LinkedHashMap<String, Object> kv = new LinkedHashMap<String, Object>();
         for (String key : BiliConfig.ALL_KEYS) {
             if (BiliConfig.KEY_CODEC.equals(key) || BiliConfig.KEY_AUDIO_QUALITY.equals(key)
-                    || BiliConfig.KEY_HDR.equals(key)) {
+                    || BiliConfig.KEY_HDR.equals(key) || BiliConfig.KEY_IP_SCOPE.equals(key)
+                    || BiliConfig.KEY_ACCEL_CONCURRENCY.equals(key)
+                    || BiliConfig.KEY_ACCEL_CACHE_MB.equals(key)
+                    || BiliConfig.KEY_ACCEL_MODE.equals(key)) {
                 kv.put(key, sp(c).getInt(key, BiliConfig.defaultIntOf(key)));
-            } else if (BiliConfig.KEY_FEED_BLOCK_TNAMES.equals(key)) {
+            } else if (BiliConfig.KEY_FEED_BLOCK_TNAMES.equals(key)
+                    || BiliConfig.KEY_ACCEL_CUSTOM_HOSTS.equals(key)) {
                 kv.put(key, sp(c).getString(key, ""));
             } else {
                 kv.put(key, sp(c).getBoolean(key, BiliConfig.defaultValueOf(key)));

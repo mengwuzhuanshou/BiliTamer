@@ -35,7 +35,23 @@ public final class ListenPauseHooks {
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> probeSet =
             java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
-    private final java.util.concurrent.atomic.AtomicBoolean audioPauseFired =
+    // cheese 决策点观测：once 首条 + 低频心跳（长会话里决策是否还在被咨询）
+    private final java.util.concurrent.atomic.AtomicBoolean cheeseModeForced =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicLong cheeseModeCount =
+            new java.util.concurrent.atomic.AtomicLong(0);
+    private final java.util.concurrent.atomic.AtomicBoolean notifyProbe =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.Set<String> coreProbeFired =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+    // 完成守卫：完成事件时刻 + 6s 窗口，窗内拦下一集的加载/起播（按时间生效，无轮询）。
+    private static final long GUARD_WINDOW_MS = 6000L;
+    private volatile long listenGuardUntil = 0L;
+    private final java.util.concurrent.atomic.AtomicBoolean completionIntercepted =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicBoolean guardStartedProbe =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicBoolean guardBlockedProbe =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public ListenPauseHooks(HookApi api, ClassLoader cl) {
@@ -44,6 +60,244 @@ public final class ListenPauseHooks {
     }
 
     public void install() {
+        // 6.3.0/6.4.0：biz 层（b.r 置位 / b.l 决策 / 广播兜底）。6.5.0 起 biz 层消亡，
+        // 这些候选自然 miss，无害。
+        try {
+            installBizLayer();
+        } catch (Throwable t) {
+            api.debug("listen: biz layer unavailable (6.5.0+ expected): " + t);
+        }
+        // 6.5.0+ 主修复：CE1.f.onCompletion（唯一完成监听器，fanout 实证）听模式拦截
+        // + 播放器 setDataSource/prepareAsync/start 的 6s 完成守卫（拦下一集加载）。
+        installListenCompletionGuard();
+        // 观测探针（once，无性能影响）。
+        installCheesePlaybackMode();
+        installNotifyCompletionProbe();
+        installCoreListenerProbes();
+    }
+
+    /**
+     * 6.5.0+ 听模式「听完暂停」最终方案（2026-09-27 真机取证定稿）。
+     *
+     * <p>取证结论：① 播放器唯一的 OnCompletionListener 是 CE1.f（fanout 反射实证，
+     * mOnCompletionListener 槽位就是它；BumPuntpKaisaet/Peerkierk 等随机名类是运行时
+     * 防护改写后的 CE1.f 自己的方法体）；② 完成事件听/普通模式都经过 CE1.f；
+     * ③ **「切下一集」不由完成事件驱动**——旧版在 CE1.f 吞掉事件后框架照样加载下一集
+     * （切集判定来自框架自己的进度检查，不是监听器回调）。
+     *
+     * <p>因此分两层：① CE1.f.onCompletion 时把播放器停在片尾前 0.8s 并 pause（用户可见的
+     * 「听完暂停」）；② 完成后 6s 守卫窗内，拦下播放器实例上的一切 setDataSource、
+     * prepareAsync、start 调用（= 下一集的加载与起播必经之路；自然结束时框架的切集动作
+     * 就落在这个窗口里）。守卫按时间窗生效、按实例不区分——普通模式下若用户开了 App 自己
+     * 的连播，完成后 6s 内的自动连播也会被拦（听完暂停开启的语义本就是「播完停下」）；
+     * 关闭开关即完全恢复原生。零监听、零轮询：全部挂在宿主已有的调用上。
+     */
+    private void installListenCompletionGuard() {
+        // 第 1 层：完成事件 → 停在片尾 + 拉起守卫窗。
+        try {
+            final Class<?> c = api.load(cl, "CE1.f");
+            Method oc = null;
+            for (Method mm : c.getDeclaredMethods()) {
+                if (!mm.getName().equals("onCompletion")) continue;
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length == 1 && ps[0].getName().endsWith("IMediaPlayer")) { oc = mm; break; }
+            }
+            if (oc == null) {
+                api.warn("listen: CE1.f.onCompletion not found");
+            } else {
+                api.deoptimize(oc);
+                api.addHook("listen: completion guard", oc, new XposedInterface.Hooker() {
+                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        if (!api.isListenPauseEnabled()) return chain.proceed();
+                        if (completionIntercepted.compareAndSet(false, true)) {
+                            api.info("listen[probe]: CE1.f.onCompletion fired thiz=CE1.f");
+                        }
+                        Object mp = chain.getArg(0);
+                        if (mp != null) {
+                            // 停在片尾：completed 态直接 pause 是 no-op，先 seek 回 0.8s 再 pause。
+                            try {
+                                long dur = 0;
+                                try {
+                                    Method dm = mp.getClass().getMethod("getDuration");
+                                    dm.setAccessible(true);
+                                    Object d = dm.invoke(mp);
+                                    if (d instanceof Long) dur = ((Long) d).longValue();
+                                    else if (d instanceof Integer) dur = ((Integer) d).longValue();
+                                } catch (Throwable ig1) { }
+                                long target = Math.max(0, dur - 800);
+                                try {
+                                    Method sm = mp.getClass().getMethod("seekTo", long.class);
+                                    sm.setAccessible(true);
+                                    sm.invoke(mp, Long.valueOf(target));
+                                } catch (Throwable ig2) {
+                                    try {
+                                        Method sm2 = mp.getClass().getMethod("seekTo", int.class);
+                                        sm2.setAccessible(true);
+                                        sm2.invoke(mp, Integer.valueOf((int) target));
+                                    } catch (Throwable ig3) { }
+                                }
+                                try {
+                                    Method pm = mp.getClass().getMethod("pause");
+                                    pm.setAccessible(true);
+                                    pm.invoke(mp);
+                                } catch (Throwable ig4) { }
+                            } catch (Throwable t) {
+                                api.warn("listen: seek-pause failed: " + t);
+                            }
+                        }
+                        // 拉起守卫窗并吞掉事件（完成动作由守卫层接管）。
+                        listenGuardUntil = System.currentTimeMillis() + GUARD_WINDOW_MS;
+                        if (guardStartedProbe.compareAndSet(false, true)) {
+                            api.info("listen[probe]: listen completion -> pause + guard 6s");
+                        }
+                        return null;
+                    }
+                });
+                api.info("listen: completion guard ok -> CE1.f.onCompletion");
+            }
+        } catch (Throwable t) {
+            api.warn("listen: completion guard hook failed: " + t);
+        }
+        // 第 2 层：守卫窗内拦下一集的加载/起播（IjkMediaPlayer 与其代理）。
+        for (final String pcls : new String[]{
+                "tv.danmaku.ijk.media.player.IjkMediaPlayer",
+                "tv.danmaku.ijk.media.player.MediaPlayerProxy"}) {
+            Class<?> pc;
+            try {
+                pc = api.load(cl, pcls);
+            } catch (Throwable t) {
+                api.debug("listen: guard class miss " + pcls);
+                continue;
+            }
+            int n = 0;
+            for (Method m : pc.getDeclaredMethods()) {
+                if (m.isSynthetic() || java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+                String name = m.getName();
+                boolean isLoad = name.equals("setDataSource") || name.startsWith("setDataSource")
+                        || name.equals("prepareAsync") || name.equals("start");
+                if (!isLoad) continue;
+                final String tag = "listen: next-guard " + name + "/" + m.getParameterTypes().length;
+                try {
+                    api.deoptimize(m);
+                    api.addHook(tag, m, new XposedInterface.Hooker() {
+                        @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                            if (api.isListenPauseEnabled()
+                                    && System.currentTimeMillis() < listenGuardUntil) {
+                                if (guardBlockedProbe.compareAndSet(false, true)) {
+                                    api.info("listen[probe]: next-episode load blocked by guard ("
+                                            + tag + ")");
+                                }
+                                return null;
+                            }
+                            return chain.proceed();
+                        }
+                    });
+                    n++;
+                } catch (Throwable t) {
+                    api.debug("listen: guard hook " + tag + " unavailable: " + t);
+                }
+            }
+            api.info("listen: next-guard hooks=" + n + " on " + pcls);
+        }
+    }
+
+    private void installCoreListenerProbes() {
+        // 全量 OnCompletionListener 实现类只读探针（6.5.0 实现类扫描，排除广告/剪辑器后）。
+        // CE1.f 不在此列——它挂的是上面的真正拦截钩子（含 fanout 结构转储）。
+        for (final String cn : new String[]{
+                "RI1.l",
+                "nU.f", "xS.c",                     // classes15
+                "XF0.j",                            // classes17
+                "tv.danmaku.bili.ui.main2.mine.k",  // classes26
+                "tv.danmaku.bili.ui.main2.mineV2.ui.o",
+                "P01.i", "c51.f", "kU0.b", "u41.c", "uV0.d", "y11.g",  // classes31
+                "OO.a", "xK.f", "lJ.m",             // classes11
+                "A5.s0", "A5.t", "A5.x", "w5.d",    // classes
+                "tv.danmaku.ijk.media.player.MediaPlayerProxy$2",  // classes27
+        }) {
+            try {
+                final Class<?> c = api.load(cl, cn);
+                Method oc = null;
+                for (Method mm : c.getDeclaredMethods()) {
+                    if (!mm.getName().equals("onCompletion")) continue;
+                    Class<?>[] ps = mm.getParameterTypes();
+                    if (ps.length == 1 && ps[0].getName().endsWith("IMediaPlayer")) { oc = mm; break; }
+                }
+                if (oc == null) continue;
+                api.deoptimize(oc);
+                api.addHook("listen: probe " + cn + ".onCompletion", oc, new XposedInterface.Hooker() {
+                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        if (coreProbeFired.add(cn)) {
+                            Object thiz = chain.getThisObject();
+                            Object mp = chain.getArg(0);
+                            api.info("listen[probe]: " + cn + ".onCompletion fired thiz="
+                                    + (thiz == null ? "null" : thiz.getClass().getName())
+                                    + " mp=" + (mp == null ? "null" : mp.getClass().getName()));
+                            StackTraceElement[] st = Thread.currentThread().getStackTrace();
+                            int shown = 0;
+                            for (StackTraceElement e : st) {
+                                String s = e.toString();
+                                if (s.startsWith("dalvik.system.") || s.startsWith("java.lang.Thread.")
+                                        || s.startsWith("com.tamer.bili.")) {
+                                    continue;
+                                }
+                                api.info("listen[probe]:   at " + s);
+                                if (++shown >= 16) break;
+                            }
+                        }
+                        return chain.proceed();
+                    }
+                });
+                api.info("listen: core listener probe ok -> " + cn + ".onCompletion");
+            } catch (Throwable t) {
+                api.debug("listen: core listener probe " + cn + " unavailable: " + t);
+            }
+        }
+    }
+
+    private void installNotifyCompletionProbe() {
+        try {
+            final Class<?> amp = api.load(cl, "tv.danmaku.ijk.media.player.AbstractMediaPlayer");
+            Method n = null;
+            for (Method mm : amp.getDeclaredMethods()) {
+                if (!mm.getName().equals("notifyOnCompletion")) continue;
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length == 0) { n = mm; break; }
+            }
+            if (n == null) {
+                api.debug("listen: notifyOnCompletion() not found");
+                return;
+            }
+            api.deoptimize(n);
+            api.addHook("listen: probe notifyOnCompletion", n, new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    if (notifyProbe.compareAndSet(false, true)) {
+                        Object thiz = chain.getThisObject();
+                        api.info("listen[probe]: notifyOnCompletion on "
+                                + (thiz == null ? "null" : thiz.getClass().getName()));
+                        StackTraceElement[] st = Thread.currentThread().getStackTrace();
+                        int shown = 0;
+                        for (StackTraceElement e : st) {
+                            String s = e.toString();
+                            if (s.startsWith("dalvik.system.") || s.startsWith("java.lang.Thread.")
+                                    || s.startsWith("com.tamer.bili.")
+                                    || s.startsWith("tv.danmaku.ijk.media.player.")) {
+                                continue;
+                            }
+                            api.info("listen[probe]:   at " + s);
+                            if (++shown >= 14) break;
+                        }
+                    }
+                    return chain.proceed();
+                }
+            });
+            api.info("listen: notifyOnCompletion probe ok");
+        } catch (Throwable t) {
+            api.debug("listen: notify probe unavailable: " + t);
+        }
+    }
+
+    private void installBizLayer() {
         try {
             final Class<?> biz = api.load(cl, "com.bilibili.mini.player.biz.b");
             java.util.List<Method> targets = new java.util.ArrayList<>();
@@ -94,9 +348,6 @@ public final class ListenPauseHooks {
                     sb.append(mm.getName()).append("(").append(mm.getParameterTypes().length).append(")");
                     api.warn("listen:   " + sb.toString());
                 }
-                // biz 层全 miss（6.5.0 起）：仍要装播放器核心完成监听器（CE1.f/RI1.l，
-                // 听模式完成事件的唯一真实入口），不得在此提前 return
-                installAudioPlayerPause();
                 return;
             }
             for (Method t : targets) {
@@ -106,100 +357,72 @@ public final class ListenPauseHooks {
             installDecisionHook(rField);
             installEventProbes();
             installPlayerCoreProbes();
-            installAudioPlayerPause();
             api.info("ListenPauseHooks installed -> " + targets.size() + " completion entr(ies)");
         } catch (Throwable t) {
-            api.error("listen: hook unavailable", t);
+            api.error("listen: biz layer hook unavailable", t);
         }
     }
 
-    /** 播放器核心完成监听器：听模式完成事件只走这里（biz 层 b.l/Q1/广播器全部不触发）。
-     *  6.4.0: RI1.l（单字段 RI1.r 核心持有者）；6.5.0: CE1.f（R8 把完成/Info 两个监听器
-     *  横向合并成 (Object capture, int tag) 合成类，onCompletion(IMediaPlayer) 签名未变；
-     *  由播放器核心 vJ1.m 字段 H 注册，与 6.4.0 RI1.r 字段 H=RI1.l 槽位一一对应）。
-     *  动作：反射调用播放器核心 pause() 并阻断转发（= 不自动切下一集）。 */
-    private void installAudioPlayerPause() {
-        Class<?> c = null;
-        String anchorUsed = null;
-        for (String cn : new String[]{"RI1.l", "CE1.f"}) {
-            try {
-                Class<?> cand = api.load(cl, cn);
-                boolean shape = false;
-                for (Method mm : cand.getDeclaredMethods()) {
-                    if (!mm.getName().equals("onCompletion")) continue;
-                    Class<?>[] ps = mm.getParameterTypes();
-                    if (ps.length == 1 && ps[0].getName().endsWith("IMediaPlayer")) { shape = true; break; }
+    /**
+     * 6.5.0+ 正解：cheese（theseus 听模式框架）的「播完动作」转换工厂
+     * com.bilibili.ship.theseus.cheese.player.playselect.PlaybackMode$a.a(I)。
+     * cheese 框架所有「播完当前视频后干什么」的读取处（playselect/b 协程、
+     * CheeseEpisodeListRepository、学习完成弹层、下集提醒）都经这个静态工厂把
+     * pref int（pref_player_completion_action_key3）转成 PlaybackMode 枚举再分支。
+     *
+     * <p>枚举序（dex <clinit> 实证）：AUTO_CONTINUOUS(0) / PAUSE_WHEN_ENDED(1) /
+     * SINGLE_EPISODE_LOOP(2) / LIST_LOOP(3)。开关开启时把返回值替换为 PAUSE_WHEN_ENDED——
+     * 让 App 自己的「完成后暂停」分支接管（App 自测过的行为），不自己实现暂停。
+     * cheese 只服务听模式/列表播放，普通视频播放不经它 ⇒ 天然不误伤普通模式的自动连播。
+     *（旧方案=播放器核心 onCompletion 吞事件（CE1.f）会同时命中普通视频模式，造成
+     * 正常播完也回退一秒并停止连播，且吞了事件后 cheese 决策点根本不再被咨询——已废弃。） */
+    private void installCheesePlaybackMode() {
+        Class<?> factory;
+        Method a;
+        Object pauseEnum;
+        try {
+            factory = api.load(cl, "com.bilibili.ship.theseus.cheese.player.playselect.PlaybackMode$a");
+            Method found = null;
+            for (Method mm : factory.getDeclaredMethods()) {
+                if (!java.lang.reflect.Modifier.isStatic(mm.getModifiers())) continue;
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length == 1 && ps[0] == int.class
+                        && mm.getReturnType().getName().endsWith("PlaybackMode")) {
+                    found = mm;
+                    break;
                 }
-                if (shape) { c = cand; anchorUsed = cn; break; }
-            } catch (Throwable next) {
-                // 下一候选
             }
-        }
-        if (c == null) {
-            api.warn("listen: player-core completion listener not found (RI1.l / CE1.f)");
+            if (found == null) {
+                api.warn("listen: cheese PlaybackMode factory a(I) not found");
+                return;
+            }
+            a = found;
+            Class<?> enumCls = api.load(cl,
+                    "com.bilibili.ship.theseus.cheese.player.playselect.PlaybackMode");
+            pauseEnum = enumCls.getDeclaredField("PAUSE_WHEN_ENDED").get(null);
+        } catch (Throwable t) {
+            // 6.3.0/6.4.0 没有 cheese 框架：走 biz 层候选即可。
+            api.debug("listen: cheese framework not present (pre-6.5.0 expected): " + t);
             return;
         }
         try {
-            Method oc = null;
-            for (Method mm : c.getDeclaredMethods()) {
-                if (!mm.getName().equals("onCompletion")) continue;
-                Class<?>[] ps = mm.getParameterTypes();
-                if (ps.length == 1 && ps[0].getName().endsWith("IMediaPlayer")) { oc = mm; break; }
-            }
-            if (oc == null) {
-                api.warn("listen: " + anchorUsed + ".onCompletion not found");
-                return;
-            }
-            api.deoptimize(oc);
-            api.addHook("listen: audio completion", oc, new XposedInterface.Hooker() {
+            api.deoptimize(a);
+            api.addHook("listen: cheese playback mode", a, new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                    if (!api.isListenPauseEnabled()) return chain.proceed();
-                    Object thiz = chain.getThisObject();
-                    if (thiz == null) return chain.proceed();
-                    if (audioPauseFired.compareAndSet(false, true)) {
-                        api.info("listen: audio completion intercepted -> pause");
+                    Object result = chain.proceed();
+                    if (!api.isListenPauseEnabled()) return result;
+                    if (cheeseModeForced.compareAndSet(false, true)) {
+                        api.info("listen[probe]: cheese mode factory arg=" + chain.getArg(0)
+                                + " -> forced PAUSE_WHEN_ENDED");
+                    } else if (cheeseModeCount.incrementAndGet() % 100L == 0L) {
+                        api.info("listen: cheese mode forced x" + cheeseModeCount.get());
                     }
-                    // completed 状态下直接 pause 是 no-op：
-                    // 先 seekTo 回退到片尾前 ~0.8s（播放器回到暂停态），再补一次 pause
-                    try {
-                        Object mp = chain.getArg(0);
-                        if (mp != null) {
-                            long dur = 0;
-                            try {
-                                Method dm = mp.getClass().getMethod("getDuration");
-                                dm.setAccessible(true);
-                                Object d = dm.invoke(mp);
-                                if (d instanceof Long) dur = ((Long) d).longValue();
-                                else if (d instanceof Integer) dur = ((Integer) d).longValue();
-                            } catch (Throwable ig1) { }
-                            long target = Math.max(0, dur - 800);
-                            try {
-                                Method sm = mp.getClass().getMethod("seekTo", long.class);
-                                sm.setAccessible(true);
-                                sm.invoke(mp, Long.valueOf(target));
-                            } catch (Throwable ig2) {
-                                try {
-                                    Method sm2 = mp.getClass().getMethod("seekTo", int.class);
-                                    sm2.setAccessible(true);
-                                    sm2.invoke(mp, Integer.valueOf((int) target));
-                                } catch (Throwable ig3) { }
-                            }
-                            try {
-                                Method pm = mp.getClass().getMethod("pause");
-                                pm.setAccessible(true);
-                                pm.invoke(mp);
-                            } catch (Throwable ig4) { }
-                        }
-                    } catch (Throwable t) {
-                        api.warn("listen: seek-pause failed: " + t);
-                    }
-                    // 阻断转发：上层不再收到完成事件，即不自动切下一集
-                    return null;
+                    return pauseEnum;
                 }
             });
-            api.info("listen: audio player pause hook ok -> " + anchorUsed + ".onCompletion");
+            api.info("listen: cheese playback mode hook ok -> PlaybackMode$a.a(I)");
         } catch (Throwable t) {
-            api.warn("listen: " + anchorUsed + " hook failed: " + t);
+            api.warn("listen: cheese mode hook failed: " + t);
         }
     }
 

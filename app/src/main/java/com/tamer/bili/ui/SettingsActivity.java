@@ -104,6 +104,13 @@ public class SettingsActivity extends Activity {
                 + "关闭=模块完全不碰 HDR 请求位，纯 App 原行为；\n"
                 + "需屏幕支持 HDR 才有实际效果");
 
+        section("下载加速（实验）", "Download acceleration (beta)");
+        addSwitch(BiliConfig.KEY_ACCEL, "多 CDN 并发加速播放/离线下载", "Multi-CDN accel (beta)",
+                "把在线播放与离线下载的媒体地址改接本机 127.0.0.1 回环代理，\n"
+                + "背后多节点多区间并发取数、按序回吐；离线取到的字节前台播放直接复用。\n"
+                + "实验特性：默认关。缓存目录 files/bili_tamer_accel（配额默认 2GB，LRU 清理）；\n"
+                + "DRM/免流改写地址不接管。改动需强制停止 B 站重开（含下载进程）");
+
         section("首页布局（国内版风格）", "Home layout (CN-style)");
         addSwitch(BiliConfig.KEY_HOME_TOPBAR_MSG_ICON, "顶栏搜索栏右侧加「消息」图标", "Topbar message icon",
                 "对齐国内版布局：搜索框右侧留白处加消息图标，点击直达消息页。\n"
@@ -124,13 +131,6 @@ public class SettingsActivity extends Activity {
         addSwitch(BiliConfig.KEY_LISTEN_PAUSE_AFTER_END, "听完此视频自动暂停", "Pause when current video ends",
                 "听视频/迷你播放器播完当前视频后暂停，不自动切到下一集。\n"
                 + "零监听实现：仅拦截播放完成动作入口，无额外耗电");
-
-                section("分享", "Share");
-        addSwitch(BiliConfig.KEY_SHARE_QQ, "分享面板添加「分享到 QQ」", "Add Share-to-QQ entry",
-                "原生卡片分享仅 6.3.0 时代可用（QQ 当时未启用签名校验）；\n"
-                + "6.4.0 起 QQ 侧对重签名包直接弹「非官方应用 25201」且自带\n"
-                + "「仅分享链接」选项，注入无意义——本开关在 6.4.0 上不生效。\n"
-                + "改后需强制停止 B 站重开");
 
         section("隐藏互动提示", "Hide in-video prompts");
         addSwitch(BiliConfig.KEY_HIDE_TRIPLE, "隐藏一键三连", "Hide triple-like",

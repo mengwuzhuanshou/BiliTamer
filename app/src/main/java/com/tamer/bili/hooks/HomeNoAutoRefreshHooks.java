@@ -27,6 +27,13 @@ public final class HomeNoAutoRefreshHooks {
     private final HookApi api;
     private final ClassLoader cl;
     private final java.util.concurrent.atomic.AtomicInteger homeAttempts = new java.util.concurrent.atomic.AtomicInteger(0);
+    // once 探针：verbose 关闭时首条必打，区分「钩子没被调到」/「被调到但按空状态放行」/「正常拦截」
+    private final java.util.concurrent.atomic.AtomicBoolean firedProbe =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicBoolean allowedProbe =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicBoolean blockedProbe =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public HomeNoAutoRefreshHooks(HookApi api, ClassLoader cl) {
         this.api = api;
@@ -61,6 +68,9 @@ public final class HomeNoAutoRefreshHooks {
             api.deoptimize(z0);
             api.addHook("home: no auto refresh", z0, new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    if (firedProbe.compareAndSet(false, true)) {
+                        api.info("home[probe]: flush entry fired, type=" + chain.getArg(2));
+                    }
                     if (!api.isNoAutoRefreshEnabled()) return chain.proceed();
                     Object flushType = chain.getArg(2);
                     if (flushType != autoBack && flushType != autoOther) {
@@ -69,10 +79,17 @@ public final class HomeNoAutoRefreshHooks {
                     // 仅拦「已有内容」的自动刷新；空状态（页面/进程重建后）必须放行，
                     // 否则首屏永远空白。
                     if (!hasContent(chain.getArg(0), getState)) {
+                        if (allowedProbe.compareAndSet(false, true)) {
+                            api.info("home[probe]: auto refresh allowed (empty state, type="
+                                    + flushType + ")");
+                        }
                         if (api.isVerboseLoggingEnabled()) {
                             api.info("home: auto refresh allowed (empty state)");
                         }
                         return chain.proceed();
+                    }
+                    if (blockedProbe.compareAndSet(false, true)) {
+                        api.info("home[probe]: auto refresh blocked, type=" + flushType);
                     }
                     if (api.isVerboseLoggingEnabled()) {
                         api.info("home: auto refresh blocked (" + flushType + ")");
@@ -110,21 +127,34 @@ public final class HomeNoAutoRefreshHooks {
         return null;
     }
 
-    /** 判断 ViewModel 当前是否已有 feed 内容：
-     *  反射 getState() -> 遍历其字段找第一个 List，非空即视为有内容。 */
+    /** 判断 ViewModel 当前是否已有 feed 内容。
+     *  6.3.0/6.4.0：getState() 返回对象直接持有 List；
+     *  6.5.0：state(NE0.c) 的列表嵌在 state.a.a 两层深（NE0.a.a = List）——
+     *  只扫直接字段会永远判「无内容」，自动刷新被当空状态全部放行，功能整段失效。
+     *  改为深度受限的递归 List 搜索（限 2 层 + 限节点数，调用频率=刷新次数，开销可忽略）。 */
     private static boolean hasContent(Object vmInstance, Method getState) {
         if (vmInstance == null || getState == null) return false;
         try {
             Object state = getState.invoke(vmInstance);
-            if (state == null) return false;
-            for (Field f : state.getClass().getDeclaredFields()) {
-                f.setAccessible(true);
-                Object v = f.get(state);
-                if (v instanceof java.util.List) {
-                    return !((java.util.List<?>) v).isEmpty();
-                }
-            }
+            return containsNonEmptyList(state, 0, new int[]{0});
         } catch (Throwable t) { /* ignore */ }
+        return false;
+    }
+
+    private static boolean containsNonEmptyList(Object obj, int depth, int[] nodes) {
+        if (obj == null || depth > 2 || nodes[0] > 24) return false;
+        if (obj instanceof java.util.List) {
+            return !((java.util.List<?>) obj).isEmpty();
+        }
+        nodes[0]++;
+        for (Field f : obj.getClass().getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(f.getModifiers())
+                    || f.getType().isPrimitive()) continue;
+            try {
+                f.setAccessible(true);
+                if (containsNonEmptyList(f.get(obj), depth + 1, nodes)) return true;
+            } catch (Throwable t) { /* ignore */ }
+        }
         return false;
     }
 

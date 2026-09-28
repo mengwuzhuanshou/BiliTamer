@@ -75,6 +75,15 @@ public final class IpLocationHooks {
     private final java.util.concurrent.atomic.AtomicLong mossRpcCount =
             new java.util.concurrent.atomic.AtomicLong(0);
 
+    // 改写点活体计数：once-probe 每进程只打一条，长生命周期进程里钩子「后来死了」
+    // 完全不可见（2026-09-25 评论区属地失效排查的观测缺口）。与 mossRpcCount 同频对照：
+    // moss count 前进、write count 停滞 = 改写点脱钩；两者都前进 = 钩子活着，
+    // 问题在别处（服务端行为/传输变化）。
+    private final java.util.concurrent.atomic.AtomicLong grpcWriteSeen =
+            new java.util.concurrent.atomic.AtomicLong(0);
+    private final java.util.concurrent.atomic.AtomicLong grpcRewriteDone =
+            new java.util.concurrent.atomic.AtomicLong(0);
+
     private final java.util.Set<String> seenActivities =
             java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
 
@@ -86,7 +95,6 @@ public final class IpLocationHooks {
     private final AtomicBoolean probeCommon = new AtomicBoolean(false);
     private final AtomicBoolean probeIdp = new AtomicBoolean(false);
     private final AtomicBoolean probeRest = new AtomicBoolean(false);
-    private final AtomicBoolean probeGrpc = new AtomicBoolean(false);
     private final AtomicBoolean probeGrpcEntry = new AtomicBoolean(false);
 
     private final AtomicBoolean grpcWriteReady = new AtomicBoolean(false);
@@ -448,6 +456,13 @@ public final class IpLocationHooks {
             api.deoptimize(f);
             api.addHook("ip: grpc bin header write", f, new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    // 活体计数：挂最顶上、key 过滤之前——「钩子本身还被不被调到」是
+                    // 分层排查的第一刀。零轮询：只在宿主自己发 moss 请求时才执行。
+                    long seen = grpcWriteSeen.incrementAndGet();
+                    if (seen % 200L == 1L) {
+                        api.info("ip: grpc write seen=" + seen + " (alive, rewritten="
+                                + grpcRewriteDone.get() + ")");
+                    }
                     Object k = chain.getArg(0);
                     if (!(k instanceof String)) return chain.proceed();
                     String key = (String) k;
@@ -468,11 +483,13 @@ public final class IpLocationHooks {
                     }
                     byte[] out = rewriteMobiAppBytes((byte[]) v);
                     if (out == null) return chain.proceed();
+                    long done = grpcRewriteDone.incrementAndGet();
                     if (api.isVerboseLoggingEnabled()) {
                         api.info("ip: grpc bin header rewritten: " + key
-                                + " (" + ((byte[]) v).length + " -> " + out.length + " bytes)");
-                    } else {
-                        logRewrite(probeGrpc, "grpc " + key + " 改写生效");
+                                + " (" + ((byte[]) v).length + " -> " + out.length + " bytes, n=" + done + ")");
+                    } else if (done <= 3L || done % 200L == 0L) {
+                        // once-probe 之外再留低频心跳：长会话里改写是否还在发生，看这两行就够
+                        api.info("ip[probe]: grpc 改写生效 x" + done + " " + key);
                     }
                     return chain.proceed(new Object[]{key, out});
                 }
@@ -634,6 +651,11 @@ public final class IpLocationHooks {
         if (seenServices.size() >= 80) return;
         if (seenServices.add(key)) {
             api.debug("ip: moss svc=" + svc + " pkg=" + pkg);
+            // probe_enabled 时升到 info：排查「服务端灰度换了评论区 RPC」这类失效时，
+            // 这份清单是 ground truth（scope 不命中 = 清单里没有 reply 系服务）。
+            if (api.isProbeEnabled()) {
+                api.info("ip[probe]: moss svc=" + svc + " pkg=" + pkg);
+            }
         }
     }
 

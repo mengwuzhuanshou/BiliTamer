@@ -1,5 +1,124 @@
 # BiliTamer Release notes
 
+## v1.7.11
+
+> 本版包含未单独发布的 v1.7.10 全部变更；1.7.9 及以下用户直接安装本版。
+> This release supersedes the never-published v1.7.10 — install directly over 1.7.9 or below.
+
+* **修复：听完自动暂停在 6.5.0 听视频上不生效 / Fixed: pause-after-listen now works on
+  6.5.0 listen mode**: 旧实现挂在播放器的完成回调上吞事件——6.5.0 的听视频框架**根本不用
+  这个回调决定切集**（真机取证：完成事件后 138ms 框架独立发起下一集加载，循环/顺序模式
+  路径相同）。本版改为两层：完成事件到达时把播放器停在片尾前 0.8s 并暂停（用户可见的
+  「听完暂停」），随后 6 秒守卫窗内拦截播放器实例上的一切加载/起播调用。真机验证：完成后
+  138ms 框架试图起播下一集，被守卫精确拦下——**下一集不会自动播放**；注：框架自己的列表
+  指针仍会前进（UI 显示切到下一集），守卫拦的是播放而非列表状态，这是当前语义。普通视频
+  行为不受影响（播完原生即暂停）。零监听、零轮询。
+  / The old hook swallowed the player's completion callback — but 6.5.0's listen mode
+  decides episode switching independently (device evidence: the framework fired the
+  next-episode load 138 ms after the completion event). Now: on completion the player is
+  parked 0.8 s before the end and paused, and a 6-second guard window blocks every
+  load/start call on the player instance, so the next episode never auto-plays. Note: the
+  framework's own playlist pointer still advances (the UI jumps to the next episode) — the
+  guard blocks playback, not the list state. Verified on device; normal (non-listen)
+  playback is untouched. No listeners, no polling.
+* **修复：首页「不自动刷新」在 6.5.0 失效 / Fixed: no-home-auto-refresh ineffective on 6.5.0**:
+  6.5.0 把 feed 状态对象改成了嵌套结构（列表在 state.a.a 两层深），「已有内容」判定只扫
+  直接字段，永远判成空状态 → 每次自动刷新都被放行。现改为深度受限的递归搜索，并加探针
+  （fired / allowed-empty / blocked 三态首触日志）。真机验证：切后台返回时
+  `auto refresh blocked, type=AUTO_BACK_FROM_OTHER_PAGE`。/ 6.5.0 nested the feed state
+  object, so the has-content guard always saw "empty" and let every auto-refresh through.
+  The guard now searches nested fields, with first-fire probes for tri-state diagnosis;
+  verified on device (background-return refreshes are blocked).
+* **新增：直播后台播放入口（6.5.0）/ New: live background-play entry on 6.5.0**:
+  国际版 6.5.0 直播间的播放器设置面板里，「后台播放」（应用退至后台，可继续播放）一项被
+  房间 specialType 判定跳过而不创建。本版把该判定强制放行——设置面板恢复显示「后台播放」
+  开关，打开后退出到后台直播声音继续。真机验证：开关出现、后台播放正常（MediaSession
+  PLAYING 持续）。注意这与「仅播声音」（观看中切纯音频）是两个特性，后者仍受限于播放器
+  元数据检查，未在本版处理。/ On 6.5.0 the live-room settings panel skipped creating the
+  "Background play" entry behind a room specialType check. The check is now forced open —
+  the entry is back, and toggling it keeps live audio playing after leaving the app.
+  Verified on device (MediaSession stays PLAYING in background). Note this is distinct
+  from audio-only switching while watching, which remains gated and is not addressed here.
+* **修复：头像 →「我的」打开完整页面（6.5.0）/ Fixed: avatar → full Mine page on 6.5.0**:
+  6.5.0 上底栏 tab 选中动作类从 `FC1.c` 漂移为 `jD1.b/jD1.c`（`HomeFrameViewModel.w0` 参数
+  接口同组换名，方法名未漂移）、`tab_host` 资源 id 从 0x7f0938b4 漂到 0x7f0938d3——真实
+  派发、合成点击、tab 服务三级入口全部失守，头像降级为深链，打开的「我的」页面不完整。
+  现在动作类按候选列表（jD1.c/FC1.c）+ 形状校验解析，全失败时把 `w0` 参数接口名打进日志
+  （下次漂移一行日志定位）；合成点击的 `tab_host` 查找失败时按资源名运行时解析兜底。
+  实机验证：头像点击走真实派发，页面含离线缓存/历史/收藏/创作中心等完整功能区。
+  / On 6.5.0 the bottom-bar tab-select action class drifted (FC1.c → jD1.c) and the
+  tab_host resource id moved, so all three entry paths failed and the avatar fell back to
+  the incomplete deep-link shell. The action class is now resolved from a candidate list
+  with shape validation (falling back to logging the dispatch interface for the next
+  drift), and the tab-host lookup falls back to resolving by resource name.
+* **移除：分享面板「分享到 QQ」/ Removed: Share-to-QQ entry**: QQ 侧对重签名包的
+  「非官方应用 25201」校验已覆盖全部宿主版本（6.3.0 也失效），该 hook 无存在意义，连同
+  设置项一并删除。/ QQ now rejects repackaged builds on every supported host version, so
+  the injection hook and its settings entry are removed.
+* **IP 属地改写点加活体计数 / Liveness counters on the identity-rewrite point**: 排查
+  「评论区属地失效」时发现 once-per-process 探针会掩盖长会话中的钩子失效。改写点现在带
+  滚动计数（每 200 次写打一条 alive，每 200 次实际改打一条心跳），与 moss RPC 计数对照
+  即可分层定位：钩子死 / 服务端行为变 / 传输路径变。/ The rewrite hook now logs rolling
+  counters so a mid-session hook death is distinguishable from a server-side change —
+  the previous once-per-process probe could mask exactly that.
+* 构建 / Build: versionCode 23。
+
+## v1.7.9
+
+* **播放器挂断不再被记到 CDN 节点账上 / Player hang-ups are no longer charged to CDN nodes**:
+  播放器在饿缓冲时会从同一起点并发开多条连接、每条只取一块就断开（对代理的写由此以
+  Broken pipe 结束）。代理原先把这种「已交付若干字节后写失败」当成节点的部分失败记账，
+  而封禁表把部分失败按 0 字节空响应统计——两次就把自己正在用的镜像封掉；节点被封、
+  其余节点退避、取数更慢、播放器更饿、并发更多：限流风暴是自己造的。现在对 sink 的写
+  失败被单独识别：立即取消在飞子块、完全不记节点账；真正的 CDN 中途掉线仍照常退避，
+  且按封禁表契约带上真实字节数（拿到过字节的失败只退避、不封禁——该契约此前被调用方
+  丢字节数架空了）。/ The player opens parallel connections from the same offset when
+  starved and closes each after one chunk, surfacing as Broken pipe on our writes. Those
+  hang-ups were booked as partial node failures and — via a lost byte-count — counted as
+  empty responses, so two of them banned a mirror we were actively using: bans starved the
+  remaining nodes, which slowed fetches, which starved the player further. Sink-write
+  failures are now recognized as client-side disconnects (cancel in-flight work, zero
+  accounting), while genuine mid-stream CDN deaths keep their backoff and honor the
+  ban-list contract (bytes-received failures back off but never ban).
+* **真机量化（冷缓存 + 中段续播）/ Measured on device (cold cache + mid-file resume)**:
+  修复前一次首播走网 36.7 MB，其中仅 18.7 MB 是独一份内容——49% 流量浪费在重复下载与
+  作废的在飞子块上，伴随镜像被封、6 次无可用节点、可感知的起播卡顿。修复后同一场景：
+  4 条连接、0 封禁、0 卡缓冲，走网字节与落盘缓存逐字节相等（浪费 ≈ 0），采样 wlan 消耗
+  从 ~34 MB 降到 16.4 MB。/ Before the fix one cold session spent 36.7 MB on the wire for
+  18.7 MB of unique content (49% waste) with mirror bans and visible start-up stalls; after
+  it, the same scenario connects 4 times, bans nothing, never stalls, and every wire byte
+  lands in the shared cache (waste ≈ 0).
+* 构建 / Build: versionCode 21。
+
+## v1.7.8
+
+* **播放侧读放大清零 + 账面诚实 / Read amplification gone, ledger made honest**:
+  v1.7.4–v1.7.8 这一串都在修同一件事——前台播放被代理接管后，「一条连接只吃几十秒的料，
+  我们却替它垫付整窗流量」。最终形态是**按需扩窗**：首窗只投 2 块（`FIRST_WINDOW=2`，
+  512 KiB 刚好喂满播放器一次取数），消费过半才翻倍、上限 `min(pieces, windowBytes/chunk,
+  2×windowSlots)`；对端挂断时**只留已经下完的子块，绝不等在飞的**（v1.7.5 那版等 4 秒的写法
+  跑在 `token.cancel` 之前，死连接占满 8 个并发许可与 12 个流位，冷播 37/47 卡在缓冲，已回退）。
+  真机（intl 6.5.0，清空缓存后同一入口首播）：0 次 BUFFERING、37 次 PLAYING、
+  `stream failed` 0、`banned` 0，两条被播的流账面 `out == net` ⇒ v1.7.4 的 **8× 放大**（交付 7 MB /
+  走网 60 MB）压平。/ The prefetch window now grows on demand instead of by byte budget, and an
+  abandoned stream keeps only the pieces that already finished. On device, cold playback shows
+  zero buffering stalls and `out == net`, versus the 8× traffic amplification measured in v1.7.4.
+* **`disk=0` 是账面假象，不是缓存失效 / `disk=0` was a reporting artifact**:
+  `AccelProxy` 的 `disk` 原先取 `serveCached` 的返回值，而播放器挂断会让它抛 IOException，
+  那次赋值被整个跳过 ⇒ 所有「从盘上给、对端中途走人」的流一律记成 `disk=0 net=全部`。
+  现在逐块累计、按 `min(disk, out)` 截断。真机重放同一条视频（重装模块、新进程）：
+  `req=0--1 out=2752512 disk=2752512 net=0`，半命中
+  `req=14297108--1 out=7913244 disk=4741080 net=3172164`，切换点正好落在清单覆盖末尾
+  ⇒ **跨会话块缓存命中成立**。桌面自测 `testDisconnectDuringCacheServe` 钉住这条：
+  旧代码复现出与真机逐字同形的 `out=524288 disk=0 net=524288`。/ `disk` is now accumulated as
+  bytes leave the cache, so an aborted stream still reports its hit; the replay proves
+  cross-session reuse works (the switch to network lands exactly at the indexed coverage edge).
+* **并发流共享缓存句柄 / Shared cache handles**: `BlockCache.acquire` 按数据文件身份在进程内
+  共享实例并引用计数（v1.7.6）。覆盖清单原先只在连接关闭时刷盘，一次播放并发的多条流互相
+  看不见对方已落到数据文件里的字节，同一段被反复重下。/ Concurrent streams now share one
+  refcounted handle per file identity, so bytes a sibling already landed on disk are visible
+  immediately instead of only after that connection closes.
+
 ## v1.7.3
 
 * **适配 6.5.0：评论区/主页 IP 属地修复 / 6.5.0 support: comment & profile IP location

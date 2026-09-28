@@ -100,15 +100,18 @@ def load_conf(proj):
 
 def run(cmd, desc):
     print("==>", desc)
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    # 不用 text=True：javac 的 stderr 是 GBK，UTF-8 解码线程会崩（stdout/stderr 变 None）。
+    p = subprocess.run(cmd, capture_output=True)
+    out = (p.stdout or b"").decode("utf-8", errors="replace")
+    err = (p.stderr or b"").decode("utf-8", errors="replace")
     if p.returncode != 0:
-        print(p.stdout[-4000:])
-        print(p.stderr[-4000:])
+        print(out[-4000:])
+        print(err[-4000:])
         raise SystemExit("FAILED: " + desc)
-    if p.stdout.strip():
-        print(p.stdout.strip()[-1500:])
-    if p.stderr.strip():
-        print(p.stderr.strip()[-1500:])
+    if out.strip():
+        print(out.strip()[-1500:])
+    if err.strip():
+        print(err.strip()[-1500:])
 
 
 def java_sources(base):
@@ -129,6 +132,14 @@ def main(proj):
     desc = cfg.get("xposed_description", pkg)
     scope = cfg.get("xposed_scope", "")
     dist_name = cfg.get("dist_name", pkg + "-v%s.apk")
+    # --probe 侦查构建：scope.list 追加国内版宿主（MuMu/LSPatch 验证通路用），
+    # 产物独立命名，不影响正常发布构建。
+    if "--probe" in sys.argv:
+        pkgs = [p for p in scope.replace(",", "\n").split("\n") if p.strip()]
+        if "tv.danmaku.bili" not in pkgs:
+            pkgs.append("tv.danmaku.bili")
+        scope = "\n".join(pkgs)
+        dist_name = "BiliTamerProbe-v%s.apk"
     icon_rel = cfg.get("icon_png")
     ICON_PNG = os.path.join(proj, icon_rel) if icon_rel else None
     ICON_RES_PATH = "res/drawable/ic_launcher.png"

@@ -11,8 +11,8 @@ import com.tamer.bili.hooks.HookApi;
 import com.tamer.bili.hooks.InteractHintHooks;
 import com.tamer.bili.hooks.IpLocationHooks;
 import com.tamer.bili.hooks.ListenPauseHooks;
+import com.tamer.bili.hooks.LiveBgHooks;
 import com.tamer.bili.hooks.PlayerCodecHooks;
-import com.tamer.bili.hooks.ShareHooks;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -42,6 +42,9 @@ public class MainHook extends XposedModule implements HookApi {
     private volatile String processName = "unknown";
     private volatile BiliConfig config;
     private volatile Handler mainHandler;
+    private volatile boolean mainHost;
+    private volatile boolean domesticHost;
+    private volatile String hostPackage = BiliConfig.TARGET_PKG;
 
     /** libxposed 框架通过无参构造器反射创建模块实例。 */
     public MainHook() {
@@ -60,13 +63,8 @@ public class MainHook extends XposedModule implements HookApi {
     @Override
     public void onPackageReady(XposedModuleInterface.PackageReadyParam param) {
         try {
-            if (!BiliConfig.TARGET_PKG.equals(param.getPackageName())) {
-                return;
-            }
-            boolean main = BiliConfig.TARGET_PKG.equals(processName);
-            boolean web = BiliConfig.WEB_PROCESS.equals(processName);
-            if (!main && !web) {
-                info("skip secondary process: " + processName);
+            final String hostPkg = param.getPackageName();
+            if (!BiliConfig.isBiliHost(hostPkg)) {
                 return;
             }
             if (!hooksInstalled.compareAndSet(false, true)) {
@@ -75,16 +73,29 @@ public class MainHook extends XposedModule implements HookApi {
             }
             ClassLoader cl = param.getClassLoader();
             this.config = BiliConfig.loadForHook();
-            info("target package ready: process=" + processName
-                    + " role=" + (main ? "main" : "web")
+            boolean probe = isProbeEnabled();
+            boolean main = hostPkg.equals(processName);
+            boolean web = BiliConfig.WEB_PROCESS.equals(processName);
+            boolean download = (hostPkg + ":download").equals(processName);
+            boolean ijk = processName.endsWith(":ijkservice");
+            this.hostPackage = hostPkg;
+            if (!main && !web && !probe && !download && !ijk) {
+                info("skip secondary process: " + processName);
+                return;
+            }
+            this.mainHost = main;
+            this.domesticHost = BiliConfig.DOMESTIC_PKG.equals(hostPkg);
+            info("target package ready: pkg=" + hostPkg
+                    + " process=" + processName
+                    + " role=" + (main ? "main" : (download ? "download" : (ijk ? "ijk" : (web ? "web" : "probe-only"))))
                     + " classLoader=" + cl);
             logConfig();
             if (!config.get(BiliConfig.KEY_MASTER, true)) {
                 info("module disabled by master switch");
                 return;
             }
-            installFeatures(main, cl);
-            if (main) {
+            installFeatures(main, download, ijk, cl);
+            if (main && !domesticHost) {
                 installConfDelivery(cl);
             }
             info("BiliTamer hooks installed: total=" + hookHandles.size());
@@ -108,14 +119,51 @@ public class MainHook extends XposedModule implements HookApi {
                     + " hideVote=" + isHideVote()
                     + " hideUp=" + isHideUpPrompt()
                     + " noRefresh=" + isNoAutoRefreshEnabled()
-                    + " shareQq=" + isShareQqEnabled()
+                    + " accel=" + isAccelEnabled()
+                    + "(conc=" + getAccelConcurrency() + " mode=" + getAccelMode()
+                    + " cacheMb=" + getAccelCacheMb() + ")"
+                    + " probe=" + isProbeEnabled()
                 + " feedWords=" + getFeedBlockedTnames().split(",").length);
         } catch (Throwable t) {
             warn("logConfig failed: " + t);
         }
     }
 
-    private void installFeatures(boolean main, ClassLoader cl) {
+    private void installFeatures(boolean main, boolean download, boolean ijk, ClassLoader cl) {
+        if (isProbeEnabled()) {
+            install("ProbeHooks", new ThrowingAction() {
+                @Override public void run() throws Throwable {
+                    new com.tamer.bili.hooks.ProbeHooks(MainHook.this, cl).install();
+                }
+            });
+        }
+        if (domesticHost) {
+            // 国内版宿主仅用于侦查（混淆与功能锚点均不同），不装功能 hook
+            info("domestic host: feature hooks skipped (probe/recon only)");
+            return;
+        }
+        if (ijk && !main && !download) {
+            // :ijkservice 里 native 取流+解码（真机 ss 与 MediaCodec 栈实证），
+            // 但在线播放的 URL 帧在主进程 IjkMediaPlayerItem（AccelHooks 锚点 E），
+            // 本进程装的是锚点 A/A2/B：只在该进程内走 ijk asset 的路径上生效。
+            // 回环端口机器级共享，:ijkservice 拉主进程 46620 的代理流没有问题。
+            install("AccelHooks(:ijkservice)", new ThrowingAction() {
+                @Override public void run() throws Throwable {
+                    new com.tamer.bili.hooks.AccelHooks(MainHook.this, cl, false, hostPackage,
+                            null, 2, ":ijkservice").install();
+                }
+            });
+            return;
+        }
+        if (download && !main) {
+            // :download 进程只承担离线加速锚点（SingleSpec/控制面），其余功能与此无关
+            install("AccelHooks(:download)", new ThrowingAction() {
+                @Override public void run() throws Throwable {
+                    new com.tamer.bili.hooks.AccelHooks(MainHook.this, cl, true, hostPackage).install();
+                }
+            });
+            return;
+        }
         install("IpLocationHooks", new ThrowingAction() {
             @Override public void run() throws Throwable {
                 new IpLocationHooks(MainHook.this, cl).install();
@@ -132,6 +180,11 @@ public class MainHook extends XposedModule implements HookApi {
             }
         });
         if (main) {
+            install("LiveBgHooks", new ThrowingAction() {
+                @Override public void run() throws Throwable {
+                    new LiveBgHooks(MainHook.this, cl).install();
+                }
+            });
             install("ListenPauseHooks", new ThrowingAction() {
                 @Override public void run() throws Throwable {
                     new ListenPauseHooks(MainHook.this, cl).install();
@@ -147,14 +200,14 @@ public class MainHook extends XposedModule implements HookApi {
                     new InteractHintHooks(MainHook.this, cl).install();
                 }
             });
-            install("ShareHooks", new ThrowingAction() {
-                @Override public void run() throws Throwable {
-                    new ShareHooks(MainHook.this, cl).install();
-                }
-            });
             install("FeedTagHooks", new ThrowingAction() {
                 @Override public void run() throws Throwable {
                     new FeedTagHooks(MainHook.this, cl).install();
+                }
+            });
+            install("AccelHooks(main)", new ThrowingAction() {
+                @Override public void run() throws Throwable {
+                    new com.tamer.bili.hooks.AccelHooks(MainHook.this, cl, false, hostPackage).install();
                 }
             });
         }
@@ -295,6 +348,51 @@ public class MainHook extends XposedModule implements HookApi {
     }
 
     @Override
+    public void addHookSimple(String name, Class<?> target, String methodName,
+                              final CallObserver observer) {
+        int n = 0;
+        for (Class<?> k = target; k != null && k != Object.class; k = k.getSuperclass()) {
+            Method[] ms;
+            try {
+                ms = k.getDeclaredMethods();
+            } catch (Throwable t) {
+                break;
+            }
+            for (Method m : ms) {
+                if (!methodName.equals(m.getName())) {
+                    continue;
+                }
+                if (java.lang.reflect.Modifier.isNative(m.getModifiers())) {
+                    continue; // native 方法不可 hook（如 native_setDataSource）
+                }
+                final String hookName = name + "[" + k.getSimpleName() + "." + methodName
+                        + "/" + m.getParameterTypes().length + "]";
+                try {
+                    addHook(hookName, m, new XposedInterface.Hooker() {
+                        @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                            try {
+                                // 真实 libxposed API：getArgs() 返回 List<Object>（桩为数组形态）
+                                java.util.List<Object> l = chain.getArgs();
+                                observer.onCall(chain.getThisObject(),
+                                        l == null ? null : l.toArray());
+                            } catch (Throwable ignored) {
+                                // 观测永不影响宿主
+                            }
+                            return chain.proceed();
+                        }
+                    });
+                    n++;
+                } catch (Throwable t) {
+                    warn("addHookSimple failed: " + hookName + " (" + t + ")");
+                }
+            }
+        }
+        if (n == 0) {
+            warn("addHookSimple: no hookable method " + target.getName() + "." + methodName);
+        }
+    }
+
+    @Override
     public void postDelayed(Runnable r, long delayMillis) {
         Handler h = mainHandler;
         if (h == null) {
@@ -409,6 +507,41 @@ public class MainHook extends XposedModule implements HookApi {
     }
 
     @Override
+    public boolean isAccelEnabled() {
+        BiliConfig c = config;
+        // 出厂默认关（硬约束）：只有 conf 显式 true 才生效
+        return c != null && c.get(BiliConfig.KEY_ACCEL, false);
+    }
+
+    @Override
+    public int getAccelConcurrency() {
+        BiliConfig c = config;
+        return c == null ? BiliConfig.defaultIntOf(BiliConfig.KEY_ACCEL_CONCURRENCY)
+                : c.getInt(BiliConfig.KEY_ACCEL_CONCURRENCY,
+                        BiliConfig.defaultIntOf(BiliConfig.KEY_ACCEL_CONCURRENCY));
+    }
+
+    @Override
+    public int getAccelCacheMb() {
+        BiliConfig c = config;
+        return c == null ? BiliConfig.defaultIntOf(BiliConfig.KEY_ACCEL_CACHE_MB)
+                : c.getInt(BiliConfig.KEY_ACCEL_CACHE_MB,
+                        BiliConfig.defaultIntOf(BiliConfig.KEY_ACCEL_CACHE_MB));
+    }
+
+    @Override
+    public int getAccelMode() {
+        BiliConfig c = config;
+        return c == null ? 0 : c.getInt(BiliConfig.KEY_ACCEL_MODE, 0);
+    }
+
+    @Override
+    public String getAccelCustomHosts() {
+        BiliConfig c = config;
+        return c == null ? "" : c.getString(BiliConfig.KEY_ACCEL_CUSTOM_HOSTS);
+    }
+
+    @Override
     public boolean isHomeTopbarMessageIcon() {
         BiliConfig c = config;
         return c == null || c.get(BiliConfig.KEY_HOME_TOPBAR_MSG_ICON,
@@ -472,6 +605,12 @@ public class MainHook extends XposedModule implements HookApi {
     }
 
     @Override
+    public boolean isLiveBgUnlockEnabled() {
+        BiliConfig c = config;
+        return c != null && c.get(BiliConfig.KEY_LIVE_BG_UNLOCK,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_LIVE_BG_UNLOCK));
+    }
+
     public boolean isNoAutoRefreshEnabled() {
         BiliConfig c = config;
         return c != null && c.get(BiliConfig.KEY_NO_AUTO_REFRESH,
@@ -479,16 +618,16 @@ public class MainHook extends XposedModule implements HookApi {
     }
 
     @Override
-    public boolean isShareQqEnabled() {
-        BiliConfig c = config;
-        return c != null && c.get(BiliConfig.KEY_SHARE_QQ,
-                BiliConfig.defaultValueOf(BiliConfig.KEY_SHARE_QQ));
-    }
-
-    @Override
     public boolean isVerboseLoggingEnabled() {
         BiliConfig c = config;
         return c != null && c.get(BiliConfig.KEY_VERBOSE, false);
+    }
+
+    @Override
+    public boolean isProbeEnabled() {
+        BiliConfig c = config;
+        return c != null && c.get(BiliConfig.KEY_PROBE,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_PROBE));
     }
 
     @Override

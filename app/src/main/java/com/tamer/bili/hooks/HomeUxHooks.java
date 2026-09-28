@@ -82,7 +82,9 @@ public final class HomeUxHooks {
     private volatile boolean mineTabKept = true;
 
     /** tab_host ComposeView 的资源 id（0x7f0938b4，设备版 uiautomator 实测同名同 id）。 */
-    private static final int TAB_HOST_VIEW_ID = 0x7f0938b4;
+    // tab_host ComposeView 的 id：随构建漂移（6.4.0=0x7f0938b4 / 6.5.0=0x7f0938d3）。
+    // 常量只作快路径，找不到时按名字解析（见 tapBottomTab）。
+    private static final int TAB_HOST_VIEW_ID = 0x7f0938d3;
 
     // ===== Compose content 探针（Pegasus 底栏专项 RE）=====
     /** 已探测过 setContent 的 loader（主 loader + main2 插件 loader 各试一次）。 */
@@ -480,35 +482,52 @@ public final class HomeUxHooks {
                 return false;
             }
             ClassLoader vmCl = vm.getClass().getClassLoader();
-            Class<?> actionCls;
-            try {
-                actionCls = api.load(vmCl, "FC1.c");
-            } catch (Throwable t) {
-                api.warn("khome: tab select action class FC1.c not loadable (name drift?)");
-                return false;
-            }
-            java.lang.reflect.Constructor<?> intCtor = null;
-            try {
-                intCtor = actionCls.getConstructor(int.class);
-            } catch (NoSuchMethodException ignored) {
-            }
-            if (intCtor == null) {
-                api.warn("khome: FC1.c has no (int) ctor (shape drift?)");
-                return false;
-            }
-            for (Method mm : vm.getClass().getDeclaredMethods()) {
-                Class<?>[] ps = mm.getParameterTypes();
-                if (ps.length == 1 && Void.TYPE.equals(mm.getReturnType())
-                        && ps[0].isInterface() && ps[0].isAssignableFrom(actionCls)) {
-                    mm.setAccessible(true);
-                    Object action = intCtor.newInstance(mineSlotIndex);
-                    mm.invoke(vm, action);
-                    api.info("homeux: avatar -> real tab select dispatch (slot " + mineSlotIndex
-                            + "/" + keptTabCount + ", action=" + actionCls.getName() + ")");
-                    return true;
+            // 动作类随构建漂移：6.4.0=FC1.c / 6.5.0=jD1.c（HomeFrameViewModel.w0 的
+            // 参数接口 6.4.0=FC1.b / 6.5.0=jD1.b，方法名 w0 未漂移）。形状不变：
+            // 实现 w0 参数接口 + (int) 构造器 + int 字段。逐候选尝试，形状即证据。
+            String[] candidates = {"jD1.c", "FC1.c"};
+            for (int ci = 0; ci < candidates.length; ci++) {
+                Class<?> actionCls;
+                try {
+                    actionCls = api.load(vmCl, candidates[ci]);
+                } catch (Throwable t) {
+                    continue;
+                }
+                java.lang.reflect.Constructor<?> intCtor = null;
+                try {
+                    intCtor = actionCls.getConstructor(int.class);
+                } catch (NoSuchMethodException ignored) {
+                }
+                if (intCtor == null) {
+                    continue;
+                }
+                for (Method mm : vm.getClass().getDeclaredMethods()) {
+                    Class<?>[] ps = mm.getParameterTypes();
+                    if (ps.length == 1 && Void.TYPE.equals(mm.getReturnType())
+                            && ps[0].isInterface() && ps[0].isAssignableFrom(actionCls)) {
+                        mm.setAccessible(true);
+                        Object action = intCtor.newInstance(mineSlotIndex);
+                        mm.invoke(vm, action);
+                        api.info("homeux: avatar -> real tab select dispatch (slot " + mineSlotIndex
+                                + "/" + keptTabCount + ", action=" + actionCls.getName() + ")");
+                        return true;
+                    }
                 }
             }
-            api.warn("khome: dispatch method taking " + actionCls.getName() + " not found on vm");
+            // 全候选失败：把 vm 上 void 单参接口方法的签名打出来（限 10 条）——
+            // 下次漂移不用反编译，一行日志就能定位新接口组名。
+            int printed = 0;
+            for (Method mm : vm.getClass().getDeclaredMethods()) {
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length == 1 && Void.TYPE.equals(mm.getReturnType()) && ps[0].isInterface()) {
+                    api.warn("khome: tab dispatch iface candidate " + mm.getName()
+                            + "(" + ps[0].getName() + ")");
+                    if (++printed >= 10) {
+                        break;
+                    }
+                }
+            }
+            api.warn("khome: tab select action class drift, tried FC1.c/jD1.c");
             return false;
         } catch (Throwable t) {
             api.error("homeux: real tab select dispatch failed", t);
@@ -527,6 +546,14 @@ public final class HomeUxHooks {
                 return false;
             }
             View tabHost = root.findViewById(TAB_HOST_VIEW_ID);
+            if (tabHost == null) {
+                // id 随构建漂移：按名字解析兜底（资源名不变，值每版重排）。
+                int resolved = v.getResources().getIdentifier("tab_host", "id",
+                        v.getContext().getPackageName());
+                if (resolved != View.NO_ID) {
+                    tabHost = root.findViewById(resolved);
+                }
+            }
             if (tabHost == null || tabHost.getWidth() <= 0 || tabHost.getHeight() <= 0) {
                 return false;
             }
