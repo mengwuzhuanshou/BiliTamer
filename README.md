@@ -13,8 +13,8 @@
 > Not affiliated with Bilibili Inc.; trademarks and copyrights belong to their owners.
 > For learning and research on Android hooking techniques only.
 
-面向**国际版哔哩哔哩** `com.bilibili.app.in`（实测适配 **6.3.0 / 6.4.0 / 6.5.0**）的 LSPosed 模块。
-An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`, tested against **6.3.0 / 6.4.0 / 6.5.0**).
+面向**国际版哔哩哔哩** `com.bilibili.app.in`（实测适配 **6.3.0 / 6.4.0 / 6.5.0 / 6.6.0**）的 LSPosed 模块。
+An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`, tested against **6.3.0 / 6.4.0 / 6.5.0 / 6.6.0**).
 
 ---
 
@@ -42,7 +42,7 @@ Every switch is independently reversible; the master switch disables the whole m
 ## 环境要求 / Requirements
 
 * 已 root 的 Android 设备：Magisk 或 KernelSU + Zygisk + LSPosed / rooted device with Zygisk + LSPosed;
-* 国际版哔哩哔哩 6.3.0 / 6.4.0 / 6.5.0（com.bilibili.app.in）/ international Bilibili 6.3.0 / 6.4.0 / 6.5.0.
+* 国际版哔哩哔哩 6.3.0 / 6.4.0 / 6.5.0 / 6.6.0（com.bilibili.app.in）/ international Bilibili 6.3.0 / 6.4.0 / 6.5.0 / 6.6.0.
 
 ## 使用方法 / Installation
 
@@ -57,15 +57,19 @@ Every switch is independently reversible; the master switch disables the whole m
   proceed 前打 ThreadLocal 标记；6.5.0 起主改写点为真名类 grpc 上下文的二进制头写入口
   `kntr.base.moss.ignet.impl.grpc.c.f`（参数替换），把
   `x-bili-metadata-bin`/`x-bili-device-bin` 里 mobiApp 字节从 `android_i` 改为 `android`
-  （protobuf 变长长度前缀同步重建）。旧版兜底：6.3.0 锚点 `up1.a.a()`、6.4.0 锚点
-  `kr1.a.a()`（均带严格形状校验）
+  （protobuf 变长长度前缀同步重建）。描述符族随构建整族换名（6.4.0 `Zq1.*` / 6.5.0 `kr1.*`
+  / 6.6.0 `xr1.*`），按「名字提示 + 形状兜底」双路定位。6.3.0/6.4.0 时代的提供者级兜底
+  （`up1.a.a()`、`kr1.a.a()`、`mq0.a/oq0.a`）已从代码移除：dex 实证它们在 6.5.0 就已不存在
+  或被 R8 复用成无关类，留着只会产生重试与误导性 ERROR
   / Comment & subtitle RPCs are scoped via the moss-common-headers interceptor: before
   `chain.proceed()` the service/method is read and a ThreadLocal marker set. Since 6.5.0
   the main rewrite point is the stable, real-named binary-header write entry
   `kntr.base.moss.ignet.impl.grpc.c.f` (argument replacement) which rewrites the mobiApp
   protobuf bytes in `x-bili-metadata-bin`/`x-bili-device-bin` (`android_i` → `android`,
-  rebuilding the varint length prefix). Provider-level hooks for 6.3.0 (`up1.a.a()`) and
-  6.4.0 (`kr1.a.a()`) remain as fallbacks, now with strict shape validation;
+  rebuilding the varint length prefix). The descriptor family renames as a whole per build
+  (6.4.0 `Zq1.*` / 6.5.0 `kr1.*` / 6.6.0 `xr1.*`) and is resolved by name hints plus shape
+  validation; the legacy provider-level fallbacks were dropped once dex showed the classes
+  were gone or reused by R8;
 * 空间页走 REST：6.4.0 身份在 URL 参数里（`mobi_app=android_i`），hook 空间页 API 专属
   拦截器的 `addCommonParam` 改写之——天然按页面定域。6.3.0 锚点为 okretro 公共参数注入点
   `XA0.a` / Profile pages go through REST: on 6.4.0 the identity is a URL parameter
@@ -141,8 +145,8 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
 
 ## 已知限制 / Known limitations
 
-* 仅适配实测版本 6.3.0 / 6.4.0；其它版本需自行校准混淆锚点 / tested against 6.3.0 and
-  6.4.0 only;
+* 仅适配实测版本 6.3.0 / 6.4.0 / 6.5.0 / 6.6.0；其它版本需自行校准混淆锚点 / tested against
+  these versions only;
 * 国际版评论区目前没有广告；横幅等广告仅在使用全局身份声明（v1.2 旧行为）时出现，
   默认的评论区限定模式无此副作用 / The international comment area currently has no ads;
   banner ads only appear when the legacy global identity declaration is used — the default

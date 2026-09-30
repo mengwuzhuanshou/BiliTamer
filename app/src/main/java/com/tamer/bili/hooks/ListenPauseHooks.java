@@ -67,7 +67,7 @@ public final class ListenPauseHooks {
         } catch (Throwable t) {
             api.debug("listen: biz layer unavailable (6.5.0+ expected): " + t);
         }
-        // 6.5.0+ 主修复：CE1.f.onCompletion（唯一完成监听器，fanout 实证）听模式拦截
+        // 6.5.0+ 主修复：听模式完成监听器（6.5.0=CE1.f / 6.6.0=lK1.j，按角色定位）
         // + 播放器 setDataSource/prepareAsync/start 的 6s 完成守卫（拦下一集加载）。
         installListenCompletionGuard();
         // 观测探针（once，无性能影响）。
@@ -92,25 +92,90 @@ public final class ListenPauseHooks {
      * 的连播，完成后 6s 内的自动连播也会被拦（听完暂停开启的语义本就是「播完停下」）；
      * 关闭开关即完全恢复原生。零监听、零轮询：全部挂在宿主已有的调用上。
      */
+
+    /**
+     * 听模式完成监听器定位（6.6.0 漂移实证）：
+     * 6.5.0 = CE1.f（classes26，播放器核心容器 vJ1.m 的字段 H 就是它）；
+     * 6.6.0 = lK1.j（classes28，容器换成 lK1.o，字段仍是 H，onCompletion 体仍是
+     * getCurrentPosition + 转发 onCompletion，与 6.5.0 的 CE1.f 分支逐条同形）。
+     * 类名会整族换包且旧名会被 R8 复用，所以按「角色」验收而不是只认名字：
+     * ① 实现 IMediaPlayer$OnCompletionListener；② 只有一个实例字段的 lambda 持有者；
+     * ③ 那个字段的类型是播放器核心容器——判定依据是容器里必须有 IMediaPlayAdapter
+     * 字段（真名，跨版本稳定）。splash 广告那类监听器持有的是 SplashViewModel，
+     * 第 ③ 步就把它挡掉（6.6.0 实测 tF1.f 即此类，勿挂）。
+     */
+    private Class<?> findListenCompletionListener() {
+        for (String cn : new String[]{"lK1.j", "CE1.f"}) {
+            Class<?> c;
+            try {
+                c = api.load(cl, cn);
+            } catch (Throwable t) {
+                api.debug("listen: listener candidate " + cn + " not loadable: " + t);
+                continue;
+            }
+            if (isListenCompletionHolder(c)) {
+                api.info("listen: completion listener resolved -> " + cn);
+                return c;
+            }
+            api.debug("listen: listener candidate " + cn + " role mismatch, skip");
+        }
+        return null;
+    }
+
+    private static boolean isListenCompletionHolder(Class<?> c) {
+        boolean iface = false;
+        for (Class<?> i : c.getInterfaces()) {
+            if (i.getName().endsWith("IMediaPlayer$OnCompletionListener")) {
+                iface = true;
+                break;
+            }
+        }
+        if (!iface) {
+            return false;
+        }
+        java.util.List<Field> inst = new java.util.ArrayList<>();
+        for (Field f : c.getDeclaredFields()) {
+            if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                inst.add(f);
+            }
+        }
+        if (inst.size() != 1) {
+            return false;
+        }
+        // 唯一字段必须指向「播放器核心容器」：容器持有 IMediaPlayAdapter（真名稳定）
+        Class<?> owner = inst.get(0).getType();
+        for (Class<?> k = owner; k != null && k != Object.class; k = k.getSuperclass()) {
+            for (Field f : k.getDeclaredFields()) {
+                if (f.getType().getName().endsWith("IMediaPlayAdapter")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private void installListenCompletionGuard() {
         // 第 1 层：完成事件 → 停在片尾 + 拉起守卫窗。
         try {
-            final Class<?> c = api.load(cl, "CE1.f");
+            final Class<?> c = findListenCompletionListener();
             Method oc = null;
-            for (Method mm : c.getDeclaredMethods()) {
-                if (!mm.getName().equals("onCompletion")) continue;
-                Class<?>[] ps = mm.getParameterTypes();
-                if (ps.length == 1 && ps[0].getName().endsWith("IMediaPlayer")) { oc = mm; break; }
+            if (c != null) {
+                for (Method mm : c.getDeclaredMethods()) {
+                    if (!mm.getName().equals("onCompletion")) continue;
+                    Class<?>[] ps = mm.getParameterTypes();
+                    if (ps.length == 1 && ps[0].getName().endsWith("IMediaPlayer")) { oc = mm; break; }
+                }
             }
             if (oc == null) {
-                api.warn("listen: CE1.f.onCompletion not found");
+                api.warn("listen: listen-mode onCompletion not found (lK1.j / CE1.f)");
             } else {
                 api.deoptimize(oc);
                 api.addHook("listen: completion guard", oc, new XposedInterface.Hooker() {
                     @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                         if (!api.isListenPauseEnabled()) return chain.proceed();
                         if (completionIntercepted.compareAndSet(false, true)) {
-                            api.info("listen[probe]: CE1.f.onCompletion fired thiz=CE1.f");
+                            api.info("listen[probe]: " + c.getName()
+                                    + ".onCompletion fired (listen guard armed)");
                         }
                         Object mp = chain.getArg(0);
                         if (mp != null) {
@@ -153,7 +218,7 @@ public final class ListenPauseHooks {
                         return null;
                     }
                 });
-                api.info("listen: completion guard ok -> CE1.f.onCompletion");
+                api.info("listen: completion guard ok -> " + c.getName() + ".onCompletion");
             }
         } catch (Throwable t) {
             api.warn("listen: completion guard hook failed: " + t);
@@ -311,7 +376,16 @@ public final class ListenPauseHooks {
                     }
                 }
             }
-            final Field rField = api.declaredField(biz, "r");
+            final Field rField;
+            try {
+                rField = api.declaredField(biz, "r");
+            } catch (Throwable noField) {
+                // 6.5.0+：biz 层已消亡（类还在但没有 r 状态位，完成入口搬到 cheese/监听器），
+                // 现行修复见 installCheesePlaybackMode + installListenCompletionGuard。
+                // 这条属预期 miss，不该以 ERROR+栈的形式每天刷一遍。
+                api.debug("listen: biz layer absent on this build (" + noField + ")");
+                return;
+            }
             if (targets.isEmpty()) {
                 // 6.4.0 路径：完成入口迁入内部类（b$c.Q1(m)），参数类型 com.bilibili.mini.player.biz.m。
                 // 结构匹配内部类的全部 (m) 单参回调（完成/其它事件均包一层 r 置位；

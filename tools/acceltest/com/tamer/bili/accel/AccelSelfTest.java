@@ -210,6 +210,16 @@ public final class AccelSelfTest {
         return (byte) ((int) ((offset * 131L + 7L) % 251L) & 0xFF);
     }
 
+    /** 按 pattern 现造一段 206 响应：给不需要「文件实体」的桩通道用。 */
+    private static Transport.Response serve(long start, long last, long total) {
+        int n = (int) (last - start + 1);
+        byte[] copy = new byte[n];
+        for (int i = 0; i < n; i++) {
+            copy[i] = pattern(start + i);
+        }
+        return new Transport.Response(206, start, last, total, new ByteArrayInputStream(copy), null);
+    }
+
     /** 被放弃的请求要等的是「同伴下完了」这件事，用可数的凭据等，别拿固定 sleep 赌时机。 */
     private interface Progress {
         long served();
@@ -728,6 +738,104 @@ public final class AccelSelfTest {
         check(threw, "不支持 Range 的节点不能伪装成 206 交付");
         equal(broken.bytes, 0L, "被拒的 200 响应不产生任何字节");
         downloader.shutdown();
+    }
+
+    /**
+     * 部分镜像：节点只镜像了半份文件，越过它总长的闭区间子块被截短交付。
+     * attempt 允许截短（尾部 seek 本来就这样），旧版窗口循环于是直接跳到下一个
+     * 计划子块的起点 —— 响应体里留下一个字节空洞，真机症状就是「播放到中段
+     * 花屏，往后拉一点进度条才恢复」。修复后必须从截断点单连接续传，不许留洞。
+     */
+    private static void testPartialMirrorNoGap() {
+        section("部分镜像截短中间子块：响应体里不许留空洞");
+
+        final int size = 2 * 1024 * 1024;
+        final long mirrorTotal = 700000L;
+        byte[] file = new byte[size];
+        for (int i = 0; i < size; i++) {
+            file[i] = pattern(i);
+        }
+        Transport stub = new Transport() {
+            @Override
+            public Transport.Response open(String url, long start, long end, Map<String, String> headers,
+                                           int connectTimeoutMs, int readTimeoutMs) throws IOException {
+                if (start >= size) {
+                    return new Transport.Response(416, -1, -1, (long) size,
+                            new ByteArrayInputStream(new byte[0]), null);
+                }
+                long last = end < 0L ? size - 1L : Math.min(end, size - 1L);
+                if (end >= 0L && start < mirrorTotal && last >= mirrorTotal) {
+                    // 越过镜像断点：报短总长、只交出前半段（attempt 会当成合法的截短收下）。
+                    return serve(start, mirrorTotal - 1L, mirrorTotal);
+                }
+                return serve(start, last, (long) size);
+            }
+        };
+        CdnResolver resolver = resolverFor(url(HOSTS[0], "pm"), new ArrayList<String>(),
+                CdnResolver.MODE_MAINLAND, new CdnResolver.BanList(2));
+        PieceDownloader downloader = new PieceDownloader(stub, testConfig());
+        Recorder rec = new Recorder(file);
+        boolean threw = false;
+        try {
+            downloader.stream(resolver, null, 0L, -1L, rec, new CancelToken());
+        } catch (IOException e) {
+            threw = true;
+        }
+        downloader.shutdown();
+        check(!threw, "半份镜像不该让交付失败");
+        equal(rec.bytes, (long) size, "半份镜像场景下全量字节数");
+        check(rec.covers(0, size - 1L), "半份镜像下响应体连续无空洞（花屏回归）");
+    }
+
+    /**
+     * 起播成功之后并行子块全线被拒（节点只认单连接大区间）：旧版直接抛异常，
+     * 而响应已经开了口，AccelProxy 的兜底只认「sink 未启动」——视频流当场被砍尾，
+     * 真机症状就是「画面卡住、进度条和音频继续正常走」。修复后必须从断点
+     * 单连接续传到计划末尾。
+     */
+    private static void testMidStreamFailureResumes() {
+        section("起播后子块全失败：单连接续传而不是把流砍尾");
+
+        final int size = 1024 * 1024;
+        final long headEnd = 64L * 1024L - 1L;
+        byte[] file = new byte[size];
+        for (int i = 0; i < size; i++) {
+            file[i] = pattern(i);
+        }
+        Transport stub = new Transport() {
+            @Override
+            public Transport.Response open(String url, long start, long end, Map<String, String> headers,
+                                           int connectTimeoutMs, int readTimeoutMs) throws IOException {
+                if (start >= size) {
+                    return new Transport.Response(416, -1, -1, (long) size,
+                            new ByteArrayInputStream(new byte[0]), null);
+                }
+                long last = end < 0L ? size - 1L : Math.min(end, size - 1L);
+                boolean singleConnectionShaped = end < 0L || last - start + 1L > 64L * 1024L;
+                if (!singleConnectionShaped && start > headEnd) {
+                    throw new IOException("自测：并行子块一律被拒");
+                }
+                return serve(start, last, (long) size);
+            }
+        };
+        CdnResolver resolver = resolverFor(url(HOSTS[0], "mf"), new ArrayList<String>(),
+                CdnResolver.MODE_MAINLAND, new CdnResolver.BanList(2));
+        PieceDownloader downloader = new PieceDownloader(stub, testConfig());
+        Recorder rec = new Recorder(file);
+        long startedAt = System.currentTimeMillis();
+        boolean threw = false;
+        try {
+            downloader.stream(resolver, null, 0L, -1L, rec, new CancelToken());
+        } catch (IOException e) {
+            threw = true;
+        }
+        long elapsed = System.currentTimeMillis() - startedAt;
+        downloader.shutdown();
+        check(!threw, "子块全失败不该终结这条已开口的流");
+        equal(rec.bytes, (long) size, "续传后全量字节数");
+        check(rec.covers(0, size - 1L), "续传覆盖 [0,total) 连续无缺口");
+        // 每个失败子块最多烧掉三轮重试（轮间隔 0.5s/1s），续传本身一个请求读完。
+        check(elapsed < 20000L, "续传及时完成：" + elapsed + "ms");
     }
 
     private static void testCancel(FakeCdn cdn, byte[] file) {
@@ -1699,6 +1807,8 @@ public final class AccelSelfTest {
         testRefusedAndDropped(cdn, file);
         testPlayerHangupNotCharged(file);
         testTailAndSeek(cdn, file);
+        testPartialMirrorNoGap();
+        testMidStreamFailureResumes();
         testCancel(cdn, file);
         testAbandonedWindow(cdn, file);
         testAbandonExitsPromptly();

@@ -24,10 +24,25 @@ import io.github.libxposed.api.XposedInterface;
  *    mobiApp（android_i -> android_hd，含长度前缀重建）。
  *  - 旧 moss / REST 路径：mq0.a.e()(Metadata) / d()(Device) 生成身份头，经 okhttp
  *    Aq0.a 注入；同步改写。
- * 6.4.0 / 6.5.0 漂移（见 installKmpHeaderValue / computeWantedService 候选表）：
+ * 6.4.0 / 6.5.0 漂移（见 installCommonHeadersScope / computeWantedService 候选表）：
  *  提供者基类 up1.a -> kr1.a -> kr1.d；包装 jp1.c -> Zq1.c -> kr1.c；方法描述符
  *  jp1.g -> Zq1.g -> kr1.g（字段语义 a=包名/b=服务名/c=方法名不变）。拦截器
  *  kntr.base.moss.ignet.impl.header.b 与 MossInterceptor$e/grpc.c 为真名，跨版本稳定。
+ *
+ * 6.6.0（9130300，dex 实证）：
+ *  - 描述符族整族换包：kr1.a..n -> xr1.a..n（classes25.dex，14 个类一一对应，
+ *    字段/类型/顺序完全同形，grpc.c 构造器参数从 (kr1.k,kr1.g,[B) 变 (xr1.k,xr1.g,[B)）。
+ *    computeWantedService 靠类名提示定位描述符，故必须把 xr1.* 加进候选表——
+ *    漏加的后果是 sCommonScope 永不武装、grpc.c.f 改写数恒为 0（6.6.0 实测
+ *    「grpc write seen=201 rewritten=0」就是这个）。
+ *  - 描述符定位改为「名字提示 + 形状兜底」双路：形状兜底只认「有 a/b/c 三个
+ *    String 字段」的对象，R8 复用单字母名不会再骗过它（PITFALLS #16）。
+ *  - 已删除的历史兜底链（ip1.h / mq0.a-oq0.a 身份提供者 / kr1.a-up1.a 头提供者）：
+ *    dex 扫描实证这三条在 6.5.0 就已经断了——ip1.h 类不存在（ip1 包只剩 a 及内部类）、
+ *    oq0.a 被 R8 复用成 ConcurrentHashMap 持有者（无 e()/d()）、kr1.a 是 (String,String)
+ *    数据类（无 a()）。它们共用 sScope 线程标记，标记源头 ip1.h 没了之后即使挂上
+ *    也永不触发，只留下 3 组 30 次重试和误导性 ERROR 日志，故整簇移除。
+ *    现行有效路径只有两条：moss 二进制头 grpc.c.f（主）与 REST addCommonParam（空间页）。
  */
 public final class IpLocationHooks {
     // 国内版评论客户端身份（与国内版 HD 一致）
@@ -57,18 +72,8 @@ public final class IpLocationHooks {
     private final HookApi api;
     private final ClassLoader cl;
 
-    private final AtomicBoolean mossScopeReady = new AtomicBoolean(false);
-    private final AtomicInteger mossScopeAttempts = new AtomicInteger(0);
-    private final AtomicBoolean identityReady = new AtomicBoolean(false);
-    private final AtomicInteger identityAttempts = new AtomicInteger(0);
-    private final AtomicBoolean kmpHeaderReady = new AtomicBoolean(false);
-    private final AtomicInteger kmpHeaderAttempts = new AtomicInteger(0);
-
     private final AtomicInteger restParamsAttempts = new AtomicInteger(0);
 
-    private final java.util.concurrent.atomic.AtomicBoolean probeKmpEntry = new java.util.concurrent.atomic.AtomicBoolean(false);
-
-    private final java.util.concurrent.atomic.AtomicBoolean probeIdpFire = new java.util.concurrent.atomic.AtomicBoolean(false);
     private final java.util.Set<String> urlProbeSeen =
             java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
 
@@ -91,9 +96,7 @@ public final class IpLocationHooks {
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     // 运行时探针：verbose 关闭时，每类改写的第一条必打一行（无 logcat 也能确认活体）
-    private final AtomicBoolean probeKmp = new AtomicBoolean(false);
     private final AtomicBoolean probeCommon = new AtomicBoolean(false);
-    private final AtomicBoolean probeIdp = new AtomicBoolean(false);
     private final AtomicBoolean probeRest = new AtomicBoolean(false);
     private final AtomicBoolean probeGrpcEntry = new AtomicBoolean(false);
 
@@ -121,12 +124,9 @@ public final class IpLocationHooks {
             }
         });
         // moss 部分：立即尝试，失败则延迟重试
-        installMossScope();
-        installIdentityProvider();
-        installKmpHeaderValue();
-        installRestParams();
         installCommonHeadersScope();
         installGrpcBinHeaderWrite();
+        installRestParams();
         api.info("IpLocationHooks installed");
     }
 
@@ -141,210 +141,6 @@ public final class IpLocationHooks {
 
     private interface ThrowingAction {
         void run() throws Throwable;
-    }
-
-    /** 标记当前线程为评论 RPC scope（KMP moss 发送入口 ip1.h.a）。 */
-    private void installMossScope() {
-        if (mossScopeReady.get()) return;
-        if (mossScopeAttempts.incrementAndGet() > MAX_RETRY) {
-            api.warn("ip: moss scope give up after " + MAX_RETRY + " attempts");
-            return;
-        }
-        try {
-            final Class<?> ip1h = api.load(cl, "ip1.h");
-            Method m = null;
-            for (Method mm : ip1h.getDeclaredMethods()) {
-                if (mm.getName().equals("a") && mm.getParameterTypes().length == 4) {
-                    m = mm;
-                    break;
-                }
-            }
-            if (m == null) {
-                throw new NoSuchMethodException("ip1.h.a(4-arg) not found");
-            }
-            api.deoptimize(m);
-            api.addHook("ip: moss scope", m, new XposedInterface.Hooker() {
-                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                    Object g = chain.getArg(0);
-                    if (g == null) return chain.proceed();
-                    String svc = strField(g, "a");
-                    String method = strField(g, "c");
-                    if (svc != null && REPLY_SERVICE.equals(svc) && isReplyMethod(method)) {
-                        String old = sScope.get();
-                        if (old == null) {
-                            sScope.set("rpc:" + method);
-                            try {
-                                return chain.proceed();
-                            } finally {
-                                sScope.remove();
-                            }
-                        } else {
-                            try {
-                                return chain.proceed();
-                            } finally {
-                                sScope.set(old);
-                            }
-                        }
-                    }
-                    return chain.proceed();
-                }
-            });
-            mossScopeReady.set(true);
-            api.info("ip: moss scope hook ok -> " + ip1h.getName() + ".a (attempt=" + mossScopeAttempts.get() + ")");
-        } catch (ClassNotFoundException e) {
-            api.debug("ip: moss scope class not loaded yet, retry in " + RETRY_DELAY_MS + "ms");
-            retry(new Runnable() {
-                @Override public void run() {
-                    installMossScope();
-                }
-            });
-        } catch (Throwable t) {
-            api.error("ip: moss scope install failed", t);
-        }
-    }
-
-    /** KMP KMetadata/KDevice 头提供者：a() 返回头包装（String key + byte[] value）。
-     *  这是评论 gRPC 的 x-bili-metadata-bin / x-bili-device-bin 实际来源。
-     *  hook 后在返回的字节上改写 mobiApp（android_i -> android_hd）。 */
-    private void installKmpHeaderValue() {
-        if (kmpHeaderReady.get()) return;
-        if (kmpHeaderAttempts.incrementAndGet() > MAX_RETRY) {
-            api.warn("ip: kmp header value give up after " + MAX_RETRY + " attempts");
-            return;
-        }
-        // 提供者 hook 仅作为兜底（主改写点见 installCommonHeadersScope 的上下文头存储直改，
-        // 那条路全用真名类，跨版本稳定）。提供者基类随构建漂移（PITFALLS #3/#16）：
-        // 6.3.0=up1.a（具体类）；6.4.0=kr1.a（final a() 具体方法）；6.5.0 起变成接口
-        // kr1.d + 抽象中转 vr1.a + 5 个具体提供者，无单点可 hook，故 6.5.0 上本兜底
-        // 自然弃用（形状校验 + 抽象拒绝让它安静跳过）。6.5.0 的 up1.a 已被无关类占用，
-        // 仅凭方法名 a 会挂错类——必须过形状校验。
-        Class<?> cls = null;
-        String clsUsed = null;
-        for (String cn : new String[]{"kr1.a", "up1.a"}) {
-            try {
-                Class<?> c = api.load(cl, cn);
-                if (!isHeaderProviderBase(c)) {
-                    api.debug("ip: kmp provider candidate " + cn + " shape mismatch, skip");
-                    continue;
-                }
-                cls = c;
-                clsUsed = cn;
-                break;
-            } catch (Throwable next) {
-                // 下一候选
-            }
-        }
-        if (cls == null) {
-            if (kmpHeaderAttempts.get() >= MAX_RETRY) {
-                api.warn("ip: kmp header value give up (no provider candidate found)");
-            } else {
-                api.debug("ip: kmp header providers not present yet, retry in " + RETRY_DELAY_MS + "ms");
-                retry(new Runnable() {
-                    @Override public void run() {
-                        installKmpHeaderValue();
-                    }
-                });
-            }
-            return;
-        }
-        try {
-            final Method m = api.declaredMethod(cls, "a");
-            api.deoptimize(m);
-            api.addHook("ip: kmp header value", m, new XposedInterface.Hooker() {
-                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                    Object result = chain.proceed();
-                    if (!api.isIpLocationEnabled()) return result;
-                    if (api.getIpScopeMode() == BiliConfig.IP_SCOPE_COMMENT) {
-                        // 评论区限定模式：仅当本次 RPC 是评论/字幕服务时改写
-                        if (sCommonScope.get() == null) return result;
-                    }
-                    // 空间页 UI 定域：窗口内放行（6.4.0 空间通道不经过 header.b，无法按 svc 定位）
-                    if (sCommonScope.get() == null) {
-                        if (System.currentTimeMillis() >= sUiSpaceUntil) return result;
-                        if (probeKmpEntry.compareAndSet(false, true)) {
-                            api.info("ip: kmp hook fired (ui:space window)");
-                        }
-                    }
-                    if (result == null) return result;
-                    if (probeKmpEntry.compareAndSet(false, true)) {
-                        String k0 = null; int len0 = -1; boolean hasOld = false;
-                        try {
-                            for (Field f0 : result.getClass().getDeclaredFields()) {
-                                f0.setAccessible(true);
-                                Object v = f0.get(result);
-                                if (f0.getType() == String.class && k0 == null && v != null) k0 = String.valueOf(v);
-                                if (f0.getType() == byte[].class && v instanceof byte[]) {
-                                    len0 = ((byte[]) v).length;
-                                    hasOld = indexOfBytes((byte[]) v, "android_i") >= 0;
-                                }
-                            }
-                        } catch (Throwable ignore0) { }
-                        api.info("ip: kmp hook fired key=" + k0 + " bytes=" + len0
-                                + " containsAndroidI=" + hasOld + " scope=" + sCommonScope.get());
-                    }
-                    try {
-                        String keyStr = null;
-                        Field valF = null;
-                        for (Field f : result.getClass().getDeclaredFields()) {
-                            f.setAccessible(true);
-                            if (f.getType() == String.class && keyStr == null) {
-                                Object k = f.get(result);
-                                keyStr = k == null ? null : String.valueOf(k);
-                            } else if (f.getType() == byte[].class) {
-                                valF = f;
-                            }
-                        }
-                        if (keyStr != null && valF != null
-                                && ("x-bili-metadata-bin".equals(keyStr) || "x-bili-device-bin".equals(keyStr))) {
-                            Object val = valF.get(result);
-                            if (val instanceof byte[]) {
-                                byte[] src = (byte[]) val;
-                                byte[] out = rewriteMobiAppBytes(src);
-                                if (out != null) {
-                                    valF.set(result, out);
-                                    if (api.isVerboseLoggingEnabled()) {
-                                        api.info("ip: kmp header value rewritten: " + keyStr
-                                                + " (" + src.length + " -> " + out.length + " bytes)");
-                                    } else {
-                                        logRewrite(probeKmp, "kmp " + keyStr + " 改写生效");
-                                    }
-                                }
-                            }
-                        }
-                    } catch (Throwable t) {
-                        api.warn("ip: kmp header value rewrite failed: " + t);
-                    }
-                    return result;
-                }
-            });
-            kmpHeaderReady.set(true);
-            api.info("ip: kmp header value hook ok -> " + clsUsed + ".a (attempt=" + kmpHeaderAttempts.get() + ")");
-        } catch (Throwable t) {
-            api.error("ip: kmp header value hook failed", t);
-        }
-    }
-
-    /** 提供者基类形状校验：存在无参且非抽象的 a()，其返回类型带 (String, byte[]) 构造器
-     *  （= 头包装）。抽象 a() 不能 hook（6.5.0 kr1.d 变接口即此形态）；
-     *  单字母类名跨构建会撞名（6.5.0 up1.a 已被无关类占用），仅凭名字会把 hook
-     *  挂到不相关类上且静默无效。 */
-    private static boolean isHeaderProviderBase(Class<?> c) {
-        try {
-            for (Method mm : c.getDeclaredMethods()) {
-                if (!mm.getName().equals("a") || mm.getParameterTypes().length != 0) continue;
-                if (java.lang.reflect.Modifier.isAbstract(mm.getModifiers())) continue;
-                Class<?> rt = mm.getReturnType();
-                if (rt.isPrimitive() || rt.isArray() || rt == String.class) continue;
-                for (java.lang.reflect.Constructor<?> k : rt.getDeclaredConstructors()) {
-                    Class<?>[] ps = k.getParameterTypes();
-                    if (ps.length == 2 && ps[0] == String.class && ps[1] == byte[].class) {
-                        return true;
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        return false;
     }
 
     /** 评论区限定身份改写（v1.3，方向2 的正解）。
@@ -525,10 +321,17 @@ public final class IpLocationHooks {
                 logRewriteOnce("ctx", "ip: common headers ctx not found (chain=" + chainObj.getClass().getName() + ")");
                 return null;
             }
-            // 方法描述符随构建漂移：6.3.0=jp1.g / 6.4.0=Zq1.g / 6.5.0=kr1.g。
-            // 字段语义一致（a=packageName, b=serviceName, c=methodName，kr1.g 经
-            // KMethodDescriptor toString 实证），故只按类型名提示逐一尝试。
-            Object g = fieldTypedAnyHint(ctx, "b", new String[]{"kr1.g", "Zq1.g", "jp1.g"});
+            // 方法描述符随构建整族换包：6.3.0=jp1.g / 6.4.0=Zq1.g / 6.5.0=kr1.g
+            // / 6.6.0=xr1.g（dex 实证：kr1.a..n 与 xr1.a..n 一一对应、字段同形，
+            // grpc.c 构造器参数同步从 kr1.* 变 xr1.*）。字段语义不变
+            // （a=packageName, b=serviceName, c=methodName，kr1.g 经 KMethodDescriptor
+            // toString 实证）。名字提示之外再加「形状兜底」：字段 b 上只要是个声明了
+            // a/b/c 三个 String 字段的对象就当描述符用——下次换包不用再改代码。
+            Object g = fieldTypedAnyHint(ctx, "b",
+                    new String[]{"xr1.g", "kr1.g", "Zq1.g", "jp1.g"});
+            if (g == null) {
+                g = methodDescriptorByShape(fieldInHierarchy(ctx, "b"));
+            }
             // 6.3.0 jp1.g：service 在字段 a；6.4.0/6.5.0：a=packageName, b=serviceName，
             // c=methodName —— 语义移位过，两个都试，取像服务名的那个
             String svc = g == null ? null : strField(g, "b");
@@ -538,9 +341,16 @@ public final class IpLocationHooks {
                 if (isReplyService(alt)) svc = alt;
             }
             if (svc == null) {
-                // 兜底：k 也有服务名字段（6.3.0=jp1.k / 6.4.0=Zq1.k / 6.5.0=kr1.k）
-                Object k = fieldTypedAnyHint(ctx, "a", new String[]{"kr1.k", "Zq1.k", "jp1.k"});
+                // 兜底：k 也有服务名字段（6.3.0=jp1.k / 6.4.0=Zq1.k / 6.5.0=kr1.k
+                // / 6.6.0=xr1.k）
+                Object k = fieldTypedAnyHint(ctx, "a",
+                        new String[]{"xr1.k", "kr1.k", "Zq1.k", "jp1.k"});
                 svc = k == null ? null : strField(k, "a");
+            }
+            if (svc == null) {
+                // 末路兜底：描述符对象里任何 String 字段像服务名就算它
+                // （服务名恒为 "bilibili.xxx.vN" 形态，方法名/URL 路径不会误命中）
+                svc = serviceLikeString(g);
             }
             if (svc == null && g != null) {
                 logRewriteOnce("svc", "ip: method descriptor resolved but no service string (cls="
@@ -561,6 +371,47 @@ public final class IpLocationHooks {
             api.warn("ip: computeWantedService failed: " + t);
             return null;
         }
+    }
+
+    /** 形状兜底：认出「KMP 方法描述符」对象——自带 a/b/c 三个 String 字段
+     *  （包名/服务名/方法名）。只用于名字提示全部落空时；R8 复用单字母类名不影响它，
+     *  因为判定的是字段而不是类名。返回 null 表示形状不符（宁可漏不误挂）。 */
+    private static Object methodDescriptorByShape(Object cand) {
+        if (cand == null) return null;
+        try {
+            Field a = cand.getClass().getDeclaredField("a");
+            Field b = cand.getClass().getDeclaredField("b");
+            Field c = cand.getClass().getDeclaredField("c");
+            if (a.getType() != String.class || b.getType() != String.class
+                    || c.getType() != String.class) {
+                return null;
+            }
+            return cand;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 描述符里任一 String 字段像服务名就取它（"bilibili.xxx.vN" 形态）。
+     *  仅在按位置的 a/b/c 都没认出服务名时走这条路。 */
+    private String serviceLikeString(Object g) {
+        if (g == null) return null;
+        try {
+            for (Field f : g.getClass().getDeclaredFields()) {
+                if (f.getType() != String.class || java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                    continue;
+                }
+                f.setAccessible(true);
+                Object v = f.get(g);
+                if (!(v instanceof String)) continue;
+                String s = (String) v;
+                if (isReplyService(s) || isSpaceService(s, null) || isHomeService(s, null)) {
+                    return s;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     /** 调无参方法，按返回类型名过滤歧义重载。 */
@@ -681,37 +532,6 @@ public final class IpLocationHooks {
         return p != null && (p.contains("bilibili.app.interfaces") || p.contains("pegasus"));
     }
 
-    /** 改写 Metadata/Device 身份头（旧 moss / REST 路径）。 */
-    private void installIdentityProvider() {
-        if (identityReady.get()) return;
-        if (identityAttempts.incrementAndGet() > MAX_RETRY) {
-            api.warn("ip: identity provider give up after " + MAX_RETRY + " attempts");
-            return;
-        }
-        try {
-            try {
-                installByteProvider("mq0.a", "e", true);  // metadata (6.3.0)
-                installByteProvider("mq0.a", "d", false); // device
-            } catch (Throwable oldMissing) {
-                // 6.4.0: mq0.a 另作他用；REST 身份 provider 迁到 oq0.C0999a（e/d 同名，
-                // 见 Cq0.a.intercept 对 C0999a.e()/d() 的调用）
-                installByteProvider("oq0.a", "e", true);  // metadata (6.4.0)
-                installByteProvider("oq0.a", "d", false); // device
-            }
-            identityReady.set(true);
-            api.info("ip: identity provider hooks ok (attempt=" + identityAttempts.get() + ")");
-        } catch (ClassNotFoundException e) {
-            api.debug("ip: identity class not loaded yet, retry in " + RETRY_DELAY_MS + "ms");
-            retry(new Runnable() {
-                @Override public void run() {
-                    installIdentityProvider();
-                }
-            });
-        } catch (Throwable t) {
-            api.error("ip: identity provider install failed", t);
-        }
-    }
-
     private void retry(Runnable r) {
         try {
             api.postDelayed(r, RETRY_DELAY_MS);
@@ -724,68 +544,6 @@ public final class IpLocationHooks {
     private void logRewrite(AtomicBoolean once, String msg) {
         if (!api.isVerboseLoggingEnabled() && !once.compareAndSet(false, true)) return;
         api.info("[探针] ip: " + msg);
-    }
-
-    private void installByteProvider(final String clsName, final String methodName,
-                                     final boolean isMetadata) throws Throwable {
-        final Class<?> c = api.load(cl, clsName);
-        final Method m = api.declaredMethod(c, methodName);
-        api.deoptimize(m);
-        api.addHook("ip: identity " + clsName + "." + methodName, m, new XposedInterface.Hooker() {
-            @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                Object result = chain.proceed();
-                if (!api.isIpLocationEnabled()) return result;
-                if (probeIdpFire.compareAndSet(false, true)) {
-                    api.info("ip: identity provider fired " + clsName + "." + methodName
-                            + " scope=" + sScope.get());
-                }
-                if (sScope.get() == null) return result;
-                if (!(result instanceof byte[])) return result;
-                byte[] rewritten = rewriteIdentity((byte[]) result, isMetadata);
-                if (rewritten != null) {
-                    if (api.isVerboseLoggingEnabled()) {
-                        api.info("ip: rewritten " + clsName + "." + methodName
-                                + " (" + ((byte[]) result).length + " -> " + rewritten.length + " bytes)");
-                    } else {
-                        logRewrite(probeIdp, "identity/" + methodName + " 改写生效");
-                    }
-                    return rewritten;
-                }
-                return result;
-            }
-        });
-        api.info("ip: identity provider hook ok -> " + clsName + "." + methodName);
-    }
-
-    /** 用 protobuf 解析并改写身份字段（旧 moss / REST）。
-     *  6.4.0 proto 类改名：Metadata->KMetadata、Device->KDevice；类加载失败时
-     *  兜底用字节级 mobi_app 替换（长度前缀校验，安全幂等）。 */
-    private byte[] rewriteIdentity(byte[] src, boolean isMetadata) {
-        String[] candidates = isMetadata
-                ? new String[]{"com.bapis.bilibili.metadata.Metadata", "com.bapis.bilibili.metadata.KMetadata"}
-                : new String[]{"com.bapis.bilibili.metadata.device.Device", "com.bapis.bilibili.metadata.device.KDevice"};
-        try {
-            for (String cn : candidates) {
-                Class<?> cls = loadQuiet(cn);
-                if (cls == null) continue;
-                Object msg = invokeStatic(cls, "parseFrom", new Class[]{byte[].class}, src);
-                if (msg == null) continue;
-                Object builder = call(msg, "toBuilder");
-                call(builder, "setMobiApp", MOBI_APP);
-                call(builder, "setBuild", Integer.valueOf(BUILD));
-                call(builder, "setChannel", CHANNEL);
-                if (!isMetadata) {
-                    call(builder, "setAppId", Integer.valueOf(APP_ID));
-                    call(builder, "setVersionName", VERSION_NAME);
-                }
-                Object built = call(builder, "build");
-                Object out = call(built, "toByteArray");
-                if (out instanceof byte[]) return (byte[]) out;
-            }
-        } catch (Throwable t) {
-            api.warn("ip: protobuf rewrite: " + t);
-        }
-        return rewriteMobiAppBytes(src);
     }
 
     /** 6.4.0 空间页 REST 参数改写：空间身份走 URL 参数（mobi_app=android_i），

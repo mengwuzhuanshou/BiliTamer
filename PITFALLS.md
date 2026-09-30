@@ -554,3 +554,94 @@ Activity 的 onCreate（冷）/onNewIntent（热）截获，解析后写入宿�
     内类的 `this$0` 字段类型即得合并后的新宿主类。
   - baksmali 单独跑缺依赖（jcommander/util），用反编译器自带 lib 目录拼 classpath；
     外类缺失时优先换 jadx --single-class 验证「类真的不存在」再下结论。
+
+## 34. 多连接合并的两处「按计划在走、事实不在走」：截短留洞与失败砍尾（v1.7.12 已修）
+
+* **现象**：播放器中段花屏，往后拖一点进度条才恢复；偶发画面定格而进度条与音频照走。
+  两者都是加速内核（PieceDownloader.streamWindowed）把并行子块拼回单条连续流时的
+  账面错位，桌面回归已各自复现（修复前红、修复后绿，967 项断言全过）：
+  ① 部分镜像（节点只存了半份文件）把**中段**子块按它自己的短总长截短交付，
+     attempt 视截短为合法的尾部 EOF，窗口循环收下后直接跳到**下一个计划子块的起点**——
+     响应体留下 [截断点, 计划子块尾] 的空洞（复现里 20896 字节），解码器吃到错位数据
+     就是花屏；用户往后拉进度条＝新请求按绝对偏移重新取数，于是「拉一下就好了」。
+  ② 起播成功后某个子块三轮候选全败：旧代码直接向上抛，而 AccelProxy 的兜底只认
+     「sink 未启动」——响应已经开了口，异常等于把视频流当场砍尾，画面定格、
+     音频与进度条照走。真机账面（9-23/9-25 accel=true 会话）与此同形：178 次
+     「accel stream failed」以 Connection reset 为主，多条「stream short」。
+* **修法**：两处都改成「交付到事实边界，然后从断点单连接续传到计划末尾」：
+  截短块吐出去后留存其余已完成子块、passthrough 从截断点续；子块永久失败则
+  passthrough 从该子块起点续（等价官方单连接行为，不是装饰性兜底）。同时给
+  streamWindowed 的 sink 写失败补上 token.cancel("sink closed")，与 passthrough 里
+  v1.7.9 立的「挂断不算节点账、不等在飞子块」契约对齐。
+* **顺带修掉的第三处**：续传通道第一次实跑就死在「没有可用 CDN」——能触发续传的
+  失败风暴恰恰已把全部候选退避（指数退避 6~24s），startupCandidates 过滤 blocked
+  后返回空表。**兜底通道没有第二选择**：passthrough 在候选全被退避挡掉时退回
+  allUrls 全集，退避对它是排程提示而非硬闸门。（真机 v1.7.9 记录里就有 6 次
+  「没有可用 CDN」，同一条坑。）
+* **可复用的纪律**：① 并行转串行合并的循环里，「计划坐标」和「实际交付坐标」是两本
+  账：凡是接受了对端截短，就必须从**实际末尾**续，不能从**计划下一个**跳；
+  ② 响应开口之后，向上抛异常不是失败上报而是砍尾——流式服务端里「抛」的语义要按
+  started 前/后分开设计；③ 兜底路径的候选过滤要松于快路径：快路径挑快节点，
+  兜底路径只要还有节点肯答。
+
+## 35. 6.6.0（9130300）漂移总表 + 形状校验自身会写错：Z/I/J ≠ boolean/int/long（v1.7.12）
+
+* **本轮定位方式**：宿主升到 6.6.0 后，先用 `common/recon/shapesearch.py`（新增
+  `--iface` / `--exact-methods`）与 `dexcall.py callers/calls` 在 dex 上按形状+角色反查，
+  再装机用一行日志验收。下面每一条都是「dex 预测 → 真机日志确认」双证，不是猜名：
+
+| 作用 | 6.5.0 | 6.6.0 | 真机验收 |
+| --- | --- | --- | --- |
+| fnval 计算 | `kJ1.a` | `aK1.a`（全 dex 形状唯一命中） | `codec: fnval hook ok -> aK1.a.c()/d()` + `fnval int 17364 -> 84948` |
+| 听模式完成监听器 | `CE1.f`（容器 `vJ1.m` 字段 H） | `lK1.j`（容器 `lK1.o` 字段仍是 H，onCompletion 体同形） | `listen: completion listener resolved -> lK1.j` |
+| feed 解析入口 | `pegasus.request.g.a(Lokhttp3/E;)` | `pegasus.request.h.a(Lokhttp3/E;)`（okhttp3.Response 仍是 `E`） | `feedtag: hook ok -> com.bilibili.pegasus.request.h.a` |
+| 直播后台播放门 | `HX.c$b/$c.q1()Z`（接口 `GX.b`，日志方法 `p1`） | `JX.b$b/$c.m1()Z`（接口 `IX.b`，日志方法 `l1`）——逐条同形 | `livebg: background entry unlock ok -> JX.b$b.m1`（$c 同） |
+| gRPC 描述符族 | `kr1.a..n` | `xr1.a..n`（14 类一一对应） | 待用户打开评论区后看 `rewritten>0` |
+| 听模式 cheese 决策工厂 | `theseus.cheese.player.playselect.PlaybackMode$a.a(I)` | 真名未漂移，`PAUSE_WHEN_ENDED` 仍在 | 现行主修复无需改动 |
+| 首页底栏 | khome（`gE1.e` 过滤） | 同左 | `khome: filter armed on gE1.e, ctors=3` |
+| 底栏动作总线（头像→我的） | `w0(LjD1/b;)` + `jD1.c(index)` | 总线是 `v0(LbE1/b;)`（`dispatchAction`），但**点击链已不走总线**：`w0` 被复用成 `w0(LdE1/h$a;)` 气泡态 | 6.6.0 候选表留空 → `tab dispatch anchor not resolvable`（假锚点教训见下） |
+
+* **本轮踩到的新坑（比漂移本身更阴）**：形状校验代码里写
+  `m.getReturnType().getName().equals("Z")` —— 反射里基本类型的
+  `getName()`/`getSimpleName()` 返回的是 `boolean`/`int`/`long`，**不是 dex 描述符
+  `Z`/`I`/`J`**。后果：类找对了、方法也齐，校验却恒 false，日志只留下一句
+  「fnval class not found」，看上去像「6.6.0 又换名了」，会把人推回去重跑 dex 反查
+  （我确实先怀疑了 dex 结论）。dex 描述符与反射名是两套词汇表，跨写必错。
+* **修法与纪律**：① 候选全失败时把**每个候选的失败原因**打出来（`why: aK1.a=shape(...)`
+  `kJ1.a=shape(no aboolean ...)`），一行日志直接区分「类名被复用」与「我的判定写错」，
+  不用二次反编译；② 判定「缺哪一条」的分支要与判定本身共用同一张表，别各写一份
+  （本轮就是两份表口径不一致才暴露的）；③ 旧名（`FG1.b`/`GI1.e`/`kJ1.a`）在 6.6.0 已被
+  R8 复用成无关类（菜单工具 / Runnable / lazy 持有者），所以**只加新名不够，必须过形状**
+  ——这与 #16 的结论一致，但本轮补了一条：形状校验自己也要被真机验收。
+* **顺带清掉的噪音**：6.5.0+ 已消亡的 main2 底栏路径（`MainFragment.Zl()`、tab 模型列表）
+  和 mini-player biz 层（`biz.b` 无字段 `r`）此前每天以 ERROR+完整栈刷一遍。它们在新版是
+  **预期 miss**，降为 debug 并注明现行路径（khome / cheese+监听器）——ERROR 只留给真故障，
+  否则真故障会淹没在每日例行噪音里。
+* **仍未收口的一处**（需人手操作：系统安全设置挡住了输入注入，没法自动点开评论区）：
+  评论区身份改写：6.6.0 需打开评论区看 `ip: grpc write seen=N (rewritten>0)`
+  （描述符族 `kr1.*→xr1.*` 已按 dex 逐条比对确认候选表正确，只差这一步实机触发）。
+
+* **头像→我的页：本轮差点挂上一个「同形但不同职」的假锚点**。6.5.0 的真实派发是
+  `HomeFrameViewModel.w0(new jD1.c(index))`（底栏点击 lambda 里 new，实机确证切页）。
+  6.6.0 反查：总线换成 `v0(LbE1/b;)`（`v0` 里 `new HomeFrameViewModel$dispatchAction$1`
+  ——真名自证），而 `bE1/c;` 与 `jD1/c;` **逐条同形**（`field I a` + `<init>(I)` +
+  equals/hashCode/toString），照形状规则把它加进候选表、启动期空跑日志也确实解析成功
+  （`tab dispatch anchor ready -> HomeFrameViewModel.v0(bE1.b) action=bE1.c`）。
+  但再查一步就否了：全 dex `new-instance` 扫描 52 个 `bE1.*` 动作类共 53 处构造点，
+  **底栏点击链一处都不 new 它们**（6.6.0 点 tab 改的是 Compose 状态对象
+  `khome/widget/bottomtab/a#c(gE1.d,I)` + `I0/u#z()`）；`bE1.c` 只被
+  `com.bilibili.search2.halfscreen.i` 构造、由 `PageRouteComponent` 消费后转成
+  `bE1/g(String,I,I)` 再投回总线——它是「路由索引」不是「tab 索引」。
+  于是候选表只留实机确证过的 `jD1.c`/`FC1.c`，6.6.0 让它解析失败走兜底。
+  **纪律：形状命中只是入场券，「谁 new 它」才是角色证明**；两者都要在 dex 里查完
+  才允许进候选表。工具落到 `common/recon/dexsite.py`：
+  `python dexsite.py new --apk <apk> "LbE1/c;"`（全 dex 找 new-instance 调用点）、
+  `python dexsite.py field --apk <apk> "LbE1/c;" a`（找字段读写点）；
+  先在 6.5.0 上跑出已知答案（`LjD1/c;` 只有 1 处、正是 `bottomtab/c#invoke`）再信它的
+  6.6.0 输出。注意 `field_id_item` 前两个 ushort 是「声明类 / 字段类型」，
+  别按官方注释当「type / unused」读（`dexscan.field_sig` 同口径，实测校准过）。
+* **顺带修掉一个几何 bug**：开着「隐藏底栏我的」时，渲染过滤把 `keptTabCount` 覆写成
+  隐藏后的数量，而 `mineSlotIndex` 还是数据层下标，`(mineSlotIndex+0.5)/keptTabCount`
+  会 >=1——合成点击必然点到别的 tab。现在渲染隐藏时置 `mineHiddenInRender`，
+  头像点击直接跳过合成点击（走 tab 服务/深链），日志注明跳过原因。
+

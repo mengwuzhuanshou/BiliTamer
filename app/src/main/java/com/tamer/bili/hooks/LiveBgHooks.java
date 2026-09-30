@@ -13,10 +13,13 @@ import io.github.libxposed.api.XposedInterface;
  * 该设置项被跳过不创建。该门与 PlayConfig 无关（直播不走 PlayConfig 体系，2026-09-28
  * 探针实证），且国内版同款面板此门为放行状态。
  *
- * 实现：把 GX/b 的两个已知实现类（HX/c$b / HX/c$c，混淆名随构建漂移，按「实现了 GX/b
- * 接口 + 存在无参 q1()Z」形状兜底）的 q1() 强制返回 false —— 后台播放设置项始终创建。
- * q1 仅被面板构建与该设置项使用（全 dex 引用仅两处），影响面收敛。
- * 零监听、零轮询：只在宿主构建设置面板时执行一次布尔替换。
+ * 实现：把该门的实现类（6.5.0=HX/c$b、HX/c$c，接口 GX.b，门方法 q1()Z；
+ * 6.6.0=JX/b$b、JX/b$c，接口 IX.b，门方法 m1()Z——dex 逐条同形，连日志方法
+ * p1(String,Object[]) -> l1(String,Object[]) 都对得上）的「无参 boolean 门」强制返回
+ * false —— 后台播放设置项始终创建。类名/方法名都会整族换，所以验收看角色形状
+ * （getDanmakuParams + getPlayerParams + EssentialInfo 字段 + 恰好一个无参 boolean 方法），
+ * 名字只作入口（PITFALLS #16）。q1/m1 仅被面板构建与该设置项使用（全 dex 引用仅两处），
+ * 影响面收敛。零监听、零轮询：只在宿主构建设置面板时执行一次布尔替换。
  */
 public final class LiveBgHooks {
 
@@ -33,23 +36,57 @@ public final class LiveBgHooks {
     }
 
     public void install() {
-        // 已知实现类候选（混淆名漂移时由 shapePass 兜底）
-        for (final String cn : new String[]{"HX.c$b", "HX.c$c"}) {
+        // 实现类候选（混淆名随构建整族换：6.5.0=HX.c$b/$c，6.6.0=JX.b$b/$c，
+        // 接口 GX.b -> IX.b，门方法 q1()Z -> m1()Z，日志方法 p1 -> l1，dex 逐条同形）。
+        // 名字只当入口，真正验收的是 findGateMethod 的角色形状——旧名被 R8 复用也不会误挂。
+        for (final String cn : new String[]{"JX.b$b", "JX.b$c", "HX.c$b", "HX.c$c"}) {
             installNamed(cn);
         }
         installGateDump();
     }
 
+    /**
+     * 门方法按角色找，不按名字找：房间 gateway 信息提供者 = 同时具备
+     * ① getDanmakuParams()/getPlayerParams()（真名，跨版本稳定）；
+     * ② 一个 BiliLiveRoomEssentialInfo 字段（真名）；
+     * ③ 恰好一个无参 boolean 方法（就是 specialType 那道门，全 dex 仅此一个布尔门）。
+     * 三条同时成立才返回，否则 null（宁可漏挂也不挂错：挂错就是把别的布尔门常置 false）。
+     */
+    private static java.lang.reflect.Method findGateMethod(Class<?> c) {
+        boolean hasDanmaku = false;
+        boolean hasPlayer = false;
+        java.lang.reflect.Method gate = null;
+        int boolNoArg = 0;
+        for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
+            String n = m.getName();
+            if (m.getParameterTypes().length == 0) {
+                if (n.equals("getDanmakuParams")) hasDanmaku = true;
+                else if (n.equals("getPlayerParams")) hasPlayer = true;
+                else if (m.getReturnType() == boolean.class) {
+                    boolNoArg++;
+                    gate = m;
+                }
+            }
+        }
+        if (!hasDanmaku || !hasPlayer || boolNoArg != 1) {
+            return null;
+        }
+        boolean hasEssential = false;
+        for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+            if (f.getType().getName().endsWith("BiliLiveRoomEssentialInfo")) {
+                hasEssential = true;
+                break;
+            }
+        }
+        return hasEssential ? gate : null;
+    }
+
     private void installNamed(final String cn) {
         try {
             Class<?> c = api.load(cl, cn);
-            java.lang.reflect.Method q1 = null;
-            for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
-                if (m.getName().equals("q1") && m.getParameterTypes().length == 0
-                        && m.getReturnType() == boolean.class) { q1 = m; break; }
-            }
+            java.lang.reflect.Method q1 = findGateMethod(c);
             if (q1 == null) {
-                api.debug("livebg: q1 not found on " + cn);
+                api.debug("livebg: gate role not matched on " + cn);
                 return;
             }
             hookQ1(cn, q1);
@@ -64,18 +101,18 @@ public final class LiveBgHooks {
         }
         try {
             api.deoptimize(q1);
-            api.addHook("livebg: " + cn + ".q1", q1, new XposedInterface.Hooker() {
+            api.addHook("livebg: " + cn + "." + q1.getName(), q1, new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                     if (!api.isLiveBgUnlockEnabled()) return chain.proceed();
                     if (firedProbe.compareAndSet(false, true)) {
-                        api.info("livebg[probe]: q1() -> false (background entry forced)");
+                        api.info("livebg[probe]: " + q1.getName() + "() -> false (background entry forced)");
                     }
                     return Boolean.FALSE;
                 }
             });
-            api.info("livebg: background entry unlock ok -> " + cn + ".q1");
+            api.info("livebg: background entry unlock ok -> " + cn + "." + q1.getName());
         } catch (Throwable t) {
-            api.warn("livebg: hook " + cn + ".q1 failed: " + t);
+            api.warn("livebg: hook " + cn + "." + q1.getName() + " failed: " + t);
         }
     }
 

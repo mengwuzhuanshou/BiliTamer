@@ -92,26 +92,97 @@ public final class PlayerCodecHooks {
         void run() throws Throwable;
     }
 
+    /** fnval 持有者形状校验：a()Z / b()Z / c()I / d()J 四个无参方法齐备，
+     *  且有「自身类型的 static 字段（单例）」+ static int + static long 两个缓存位。
+     *  这套特征在 6.5.0(kJ1.a) 与 6.6.0(aK1.a) 上全 dex 唯一命中（shapesearch 实测），
+     *  足以把 R8 复用同名的无关类挡在外面。
+     *  坑：这里比对的是反射 Class#getSimpleName()（boolean/int/long），
+     *  不是 dex 描述符 Z/I/J —— 用 Z/I/J 会比中不了，等于形状校验永远判死。 */
+    private static boolean isFnvalHolder(Class<?> c) {
+        String[][] req = {{"a", "boolean"}, {"b", "boolean"}, {"c", "int"}, {"d", "long"}};
+        for (String[] r : req) {
+            boolean hit = false;
+            for (Method m : c.getDeclaredMethods()) {
+                if (!m.getName().equals(r[0]) || m.getParameterTypes().length != 0) continue;
+                if (m.getReturnType().getName().equals(r[1])) { hit = true; break; }
+            }
+            if (!hit) return false;
+        }
+        boolean selfSingleton = false;
+        boolean cacheI = false;
+        boolean cacheJ = false;
+        for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+            if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+            Class<?> t = f.getType();
+            if (t == c) selfSingleton = true;
+            else if (t == int.class) cacheI = true;
+            else if (t == long.class) cacheJ = true;
+        }
+        return selfSingleton && cacheI && cacheJ;
+    }
+
+    /** 形状不符时给出「缺哪一条」，一条日志就能判断是类名复用还是方法漂移。 */
+    private static String fnvalShapeMiss(Class<?> c) {
+        StringBuilder miss = new StringBuilder();
+        String[][] req = {{"a", "boolean"}, {"b", "boolean"}, {"c", "int"}, {"d", "long"}};
+        java.util.Set<String> have = new java.util.HashSet<>();
+        for (Method m : c.getDeclaredMethods()) {
+            if (m.getParameterTypes().length == 0) {
+                have.add(m.getName() + m.getReturnType().getSimpleName());
+            }
+        }
+        for (String[] r : req) {
+            String want = r[0] + r[1];
+            if (!have.contains(want)) {
+                miss.append("no ").append(want).append(' ');
+            }
+        }
+        boolean selfSingleton = false;
+        boolean cacheI = false;
+        boolean cacheJ = false;
+        for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+            if (!java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+            Class<?> t = f.getType();
+            if (t == c) selfSingleton = true;
+            else if (t == int.class) cacheI = true;
+            else if (t == long.class) cacheJ = true;
+        }
+        if (!selfSingleton) miss.append("no-self-singleton ");
+        if (!cacheI) miss.append("no-static-I ");
+        if (!cacheJ) miss.append("no-static-J ");
+        miss.append("(methods=").append(c.getDeclaredMethods().length)
+                .append(",fields=").append(c.getDeclaredFields().length).append(')');
+        return miss.toString().trim();
+    }
+
     /** hook 返回 fnval 的类方法（int c() 与 long d()，direct private 实例方法，
-     *  经单例字段 a 调用）。6.3.0: FG1.b；6.4.0: GI1.e；6.5.0: kJ1.a——三类同构：
-     *  单例 a、I 缓存 c、J 缓存 d、a()Z/b()Z 懒加载能力位、c()I/d()J
-     *  （6.5.0 jadx 实证 c() 仍含 512/2048/65536 fnval 位运算）。 */
+     *  经单例字段 a 调用）。6.3.0: FG1.b；6.4.0: GI1.e；6.5.0: kJ1.a；6.6.0: aK1.a。
+     *  四类同构：单例 a、I 缓存 c、J 缓存 d、a()Z/b()Z 懒加载能力位、c()I/d()J。
+     *  （6.5.0 jadx 实证 c() 仍含 512/2048/65536 fnval 位运算。）
+     *  6.6.0 定位置证（按形状全 dex 反查，两版都唯一命中）：
+     *  6.5.0 命中 kJ1.a（即当年人工记录的类名，说明形状规格可信），6.6.0 唯一命中 aK1.a；
+     *  同时 6.6.0 的 FG1.b / GI1.e / kJ1.a 已被 R8 复用成无关类（菜单工具 / Runnable /
+     *  lazy 持有者）——所以候选必须过 isFnvalHolder 形状校验，光看类名会把 hook
+     *  挂到无关方法上（PITFALLS #16）。aK1.a.d() 里调 IjkCodecHelper.isH266SupportSoft，
+     *  c() 里调 IjkCpuInfo.getCpuName，与 soft_fnval/fnval 职责一致。 */
     private void installFnval() throws Throwable {
         Class<?> fg1b = null;
         String fnvalClsUsed = null;
-        for (String cn : new String[]{"FG1.b", "GI1.e", "kJ1.a"}) {
+        StringBuilder why = new StringBuilder();
+        for (String cn : new String[]{"aK1.a", "kJ1.a", "GI1.e", "FG1.b"}) {
             try {
                 Class<?> c = api.load(cl, cn);
-                boolean ok = true;
-                try { api.declaredMethod(c, "c"); } catch (Throwable t2) { ok = false; }
-                try { api.declaredMethod(c, "d"); } catch (Throwable t2) { ok = ok; }
-                if (ok) { fg1b = c; fnvalClsUsed = cn; break; }
+                if (isFnvalHolder(c)) { fg1b = c; fnvalClsUsed = cn; break; }
+                why.append(cn).append("=shape(").append(fnvalShapeMiss(c)).append(") ");
             } catch (Throwable next) {
-                // 下一候选
+                // 下一候选：把失败原因带进日志，别让它停在「类名没找到」这种猜测上
+                why.append(cn).append("=").append(next.getClass().getSimpleName())
+                        .append("(").append(next.getMessage()).append(") ");
             }
         }
         if (fg1b == null) {
-            api.warn("codec: fnval class not found (FG1.b / GI1.e / kJ1.a)");
+            api.warn("codec: fnval class not found (aK1.a / kJ1.a / GI1.e / FG1.b)"
+                    + " loader=" + cl + " why: " + why);
             return;
         }
         // int fnval
@@ -119,7 +190,7 @@ public final class PlayerCodecHooks {
         try {
             c = api.declaredMethod(fg1b, "c");
         } catch (NoSuchMethodException e) {
-            api.warn("codec: FG1.b.c() not found");
+            api.warn("codec: " + fnvalClsUsed + ".c() not found");
         }
         if (c != null) {
             api.deoptimize(c);

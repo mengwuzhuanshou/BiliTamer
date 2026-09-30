@@ -14,8 +14,13 @@ import io.github.libxposed.api.XposedInterface;
  * 管线（9100300 实测）：PegasusViewModel.y0 → Refresh/LoadMore/CommitPreloaded 三
  * action 共用解析器 com.bilibili.pegasus.request.g（@Singleton okhttp retro
  * Converter）→ a(Lokhttp3/E;)GeneralResponse（内部委托 PegasusGsonParser.g）→
- * GeneralResponse.data=ME0.e(PegasusResponse)→d(): List<PegasusHolderData>。在此
+ * GeneralResponse.data=ME0.e(PegasusResponse)→d(): List&lt;PegasusHolderData&gt;。在此
  * AFTER 原地移除命中卡即覆盖刷新+加载更多+预载提交，下游 Store/渲染同源一致。
+ *
+ * <p>6.6.0（9130300，dex 实证）：解析入口从 request.g 搬到 <b>request.h</b>，方法形状
+ * 一字不差（a(Lokhttp3/E;)GeneralResponse，okhttp3.Response 仍是 E）；而 request.g 被 R8
+ * 复用成只有一个 static a()Z 的无关类——「类名能加载」不再代表「类是对的」，故候选表按
+ * 形状逐个尝试，miss 就换下一个（PITFALLS #16）。
  *
  * 词表：conf 键 feed_blocked_tnames（逗号分隔，设置页支持逗号/换行批量输入）。
  * 匹配语义 = tname 包含词（含「主机游戏」类长标签被「游戏」命中）；词表为空=功能关。
@@ -42,36 +47,51 @@ public final class FeedTagHooks {
     }
 
     public void install() throws Throwable {
+        // 解析器类名单字母名随构建漂移，且旧名会被 R8 复用（6.6.0 实测：
+        // com.bilibili.pegasus.request.g 只剩一个 static a()Z，真正的解析入口搬到了
+        // request.h，形状与 6.5.0 的 request.g 完全一致 a(Lokhttp3/E;)GeneralResponse）。
+        // 因此「类能加载」不等于「类是对的」：必须按形状找入口，找不到就换下一个候选。
         Class<?> parser = null;
         String parserName = null;
-        try {
-            parser = api.load(cl, "com.bilibili.pegasus.request.g");
-            parserName = "request.g";
-        } catch (Throwable t) {
-            api.warn("feedtag: request.g not loadable, trying PegasusGsonParser: " + t);
-        }
-        if (parser == null) {
-            parser = api.load(cl, "com.bilibili.pegasus.request.PegasusGsonParser");
-            parserName = "PegasusGsonParser";
-        }
         Method target = null;
         StringBuilder cands = new StringBuilder();
-        for (Method mm : parser.getDeclaredMethods()) {
-            Class<?>[] ps = mm.getParameterTypes();
-            if (ps.length != 1 || !ps[0].getName().startsWith("okhttp3.")) {
+        for (String cn : new String[]{"com.bilibili.pegasus.request.h",
+                "com.bilibili.pegasus.request.g",
+                "com.bilibili.pegasus.request.PegasusGsonParser"}) {
+            Class<?> c;
+            try {
+                c = api.load(cl, cn);
+            } catch (Throwable t) {
+                api.debug("feedtag: " + cn + " not loadable: " + t);
                 continue;
             }
-            if (!mm.getReturnType().getName().contains("GeneralResponse")) {
-                continue;
+            Method found = null;
+            for (Method mm : c.getDeclaredMethods()) {
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length != 1 || !ps[0].getName().startsWith("okhttp3.")) {
+                    continue;
+                }
+                if (!mm.getReturnType().getName().contains("GeneralResponse")) {
+                    continue;
+                }
+                cands.append(cn).append(".").append(mm.getName()).append("(")
+                        .append(ps[0].getName()).append("), ");
+                if (found == null) {
+                    found = mm;
+                }
             }
-            cands.append(mm.getName()).append("(").append(ps[0].getName()).append("), ");
-            if (target == null) {
-                target = mm;
+            if (found != null) {
+                parser = c;
+                parserName = cn;
+                target = found;
+                break;
             }
+            api.debug("feedtag: no parse entry on " + cn + ", trying next candidate");
         }
         if (target == null) {
-            api.error("feedtag: parse entry not found on " + parser.getName()
-                    + ", candidates: " + (cands.length() == 0 ? "none" : cands), null);
+            api.error("feedtag: parse entry not found on any candidate (request.h / request.g"
+                    + " / PegasusGsonParser), seen shapes: "
+                    + (cands.length() == 0 ? "none" : cands), null);
             return;
         }
         api.deoptimize(target);

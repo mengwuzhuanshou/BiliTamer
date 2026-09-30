@@ -80,6 +80,12 @@ public final class HomeUxHooks {
     private volatile int mineSlotIndex = 3;
     private volatile int keptTabCount = 4;
     private volatile boolean mineTabKept = true;
+    /**
+     * 「我的」是否被渲染层隐藏（本模块的底栏隐藏功能）。隐藏时底栏根本没有它的槽位，
+     * (mineSlotIndex+0.5)/keptTabCount 会算出 >=1 的比例，合成点击只会点到别的 tab，
+     * 所以隐藏时禁止合成点击，直接走 tab 服务/路由。数据层保留时为 false。
+     */
+    private volatile boolean mineHiddenInRender = false;
 
     /** tab_host ComposeView 的资源 id（0x7f0938b4，设备版 uiautomator 实测同名同 id）。 */
     // tab_host ComposeView 的 id：随构建漂移（6.4.0=0x7f0938b4 / 6.5.0=0x7f0938d3）。
@@ -108,6 +114,8 @@ public final class HomeUxHooks {
     private volatile java.lang.reflect.Field khomeTabListField;
     private volatile Class<?> khomeTabItemCls;
     private volatile java.lang.reflect.Field khomeItemNameField; // KC1.d.b（String 路由名）
+    /** 启动期一次性空跑「头像→我的」派发锚点是否已记录过。 */
+    private volatile boolean tabAnchorLogged = false;
     private int khomeProbeAttempts = 0;
 
     /**
@@ -430,6 +438,9 @@ public final class HomeUxHooks {
      * (boolean,int,String,View,Bundle) 方法，把 url 派发给主框架监听器，效果等同
      * 真实点底栏「我的」tab，页面完整）；深链 bilibili://user_center/mine 会打开
      * GeneralActivity 独立壳（实测缺底部功能区），只作兜底。
+     * 6.6.0 实测注：底栏点「我的」已改走 Compose 状态对象、不再有动作类可派发，
+     * 且「隐藏我的」开着时底栏压根没有它的槽位（合成点击必点错），
+     * 所以这条链上真正生效的是 tab 服务分发 / 深链两级。
      */
     private void openMineEntry(View v) {
         String url = mineTabUrl != null ? mineTabUrl : "bilibili://user_center/mine";
@@ -437,11 +448,16 @@ public final class HomeUxHooks {
         if (mineTabKept && dispatchMineTabSelect()) {
             return;
         }
-        // 次选：合成一次对底栏「我的」tab 的真实点击（兜底保留；页面同样完整）。
-        if (mineTabKept && tapBottomTab(v, (mineSlotIndex + 0.5f) / Math.max(1, keptTabCount))) {
+        // 次选：合成一次对底栏「我的」tab 的真实点击（仅当它真在底栏里渲染时；
+        // 本模块隐藏「我的」后底栏没有这个槽位，点到的是别的 tab，必须跳过）。
+        if (mineTabKept && !mineHiddenInRender
+                && tapBottomTab(v, (mineSlotIndex + 0.5f) / Math.max(1, keptTabCount))) {
             api.info("homeux: avatar -> synthesized tap on mine tab (slot " + mineSlotIndex
                     + "/" + keptTabCount + ")");
             return;
+        }
+        if (mineHiddenInRender && mineTabKept) {
+            api.debug("homeux: mine tab hidden in render -> skip synthesized tap");
         }
         // 次选：HomeTabServiceImpl 的 tab 点击事件分发（效果未确证，仅通知监听器）。
         Object svc = tabServiceRef.get();
@@ -469,11 +485,20 @@ public final class HomeUxHooks {
     }
 
     /**
-     * 真实派发：底栏 Compose 点击 handler（BottomTabComponent）对非选中 tab 调用的就是
-     * HomeFrameViewModel.w0(new C5956c(index))（jadx 名；dex 真名 FC1.c，实现 FC1.b
-     * 接口、字段 I a）。C5956c/FC1.c 属混淆名随构建漂移 → 按形状校验后使用：
-     * vm 的 void 单参接口方法 && 参数接口可由 action 类实现 && action 有 (int) 构造器。
-     * 任一环失败返回 false，走合成点击兜底。
+     * 真实派发：底栏 Compose 点击 handler（BottomTabComponent）把「选中第 i 个 tab」
+     * 作为动作对象投进 HomeFrameViewModel 的单参接口方法（动作总线）。
+     * 6.4.0 = w0(FC1.b) / FC1.c，6.5.0 = w0(jD1.b) / jD1.c——都在底栏点击 lambda 里
+     * new 出来，实机确证过切页。总线方法名与动作类名一起漂移，且旧名会被别的语义
+     * 复用：6.6.0 的 w0 已经变成 w0(dE1/h$a;)（底栏气泡/红点，由 bubble.a#b 构造，
+     * 调用方只有 BottomTabComponent$onViewCreated$3），总线换成了 v0(bE1/b;)
+     * （v0 里 new HomeFrameViewModel$dispatchAction$1 —— 真名自证）。
+     * 6.6.0 结论：**不挂任何候选**。dex 全量 new-instance 扫描（52 个 bE1.* 动作类、
+     * 53 处构造点）显示底栏点击 lambda 一个都不 new——它改的是 Compose 状态对象
+     * （khome/widget/bottomtab/a#c(gE1.d,I) + I0/u#z()），点击链已经不走动作总线了。
+     * 形状同构 ≠ 角色相同：bE1/c;{field I a, <init>(I)} 与 6.5.0 的 jD1/c; 逐条同形，
+     * 但它在 6.6.0 只被 com.bilibili.search2.halfscreen.i 构造、被 PageRouteComponent
+     * 消费后转成 bE1/g(String,I,I) 再投回总线——是「路由索引」不是「tab 索引」。
+     * 所以只保留实机确证过的 6.4.0/6.5.0 候选，6.6.0 直接走合成点击 / 路由兜底。
      */
     private boolean dispatchMineTabSelect() {
         try {
@@ -481,38 +506,17 @@ public final class HomeUxHooks {
             if (vm == null) {
                 return false;
             }
-            ClassLoader vmCl = vm.getClass().getClassLoader();
-            // 动作类随构建漂移：6.4.0=FC1.c / 6.5.0=jD1.c（HomeFrameViewModel.w0 的
-            // 参数接口 6.4.0=FC1.b / 6.5.0=jD1.b，方法名 w0 未漂移）。形状不变：
-            // 实现 w0 参数接口 + (int) 构造器 + int 字段。逐候选尝试，形状即证据。
-            String[] candidates = {"jD1.c", "FC1.c"};
-            for (int ci = 0; ci < candidates.length; ci++) {
-                Class<?> actionCls;
-                try {
-                    actionCls = api.load(vmCl, candidates[ci]);
-                } catch (Throwable t) {
-                    continue;
-                }
-                java.lang.reflect.Constructor<?> intCtor = null;
-                try {
-                    intCtor = actionCls.getConstructor(int.class);
-                } catch (NoSuchMethodException ignored) {
-                }
-                if (intCtor == null) {
-                    continue;
-                }
-                for (Method mm : vm.getClass().getDeclaredMethods()) {
-                    Class<?>[] ps = mm.getParameterTypes();
-                    if (ps.length == 1 && Void.TYPE.equals(mm.getReturnType())
-                            && ps[0].isInterface() && ps[0].isAssignableFrom(actionCls)) {
-                        mm.setAccessible(true);
-                        Object action = intCtor.newInstance(mineSlotIndex);
-                        mm.invoke(vm, action);
-                        api.info("homeux: avatar -> real tab select dispatch (slot " + mineSlotIndex
-                                + "/" + keptTabCount + ", action=" + actionCls.getName() + ")");
-                        return true;
-                    }
-                }
+            Object[] hit = findTabDispatch(vm.getClass());
+            if (hit != null) {
+                Method mm = (Method) hit[0];
+                java.lang.reflect.Constructor<?> intCtor = (java.lang.reflect.Constructor<?>) hit[1];
+                String actionName = ((Class<?>) hit[2]).getName();
+                Object action = intCtor.newInstance(mineSlotIndex);
+                mm.invoke(vm, action);
+                api.info("homeux: avatar -> real tab select dispatch " + mm.getName()
+                        + "(slot " + mineSlotIndex + "/" + keptTabCount
+                        + ", action=" + actionName + ")");
+                return true;
             }
             // 全候选失败：把 vm 上 void 单参接口方法的签名打出来（限 10 条）——
             // 下次漂移不用反编译，一行日志就能定位新接口组名。
@@ -527,11 +531,75 @@ public final class HomeUxHooks {
                     }
                 }
             }
-            api.warn("khome: tab select action class drift, tried FC1.c/jD1.c");
+            api.warn("khome: tab select action class drift, tried jD1.c/FC1.c"
+                    + " (6.6.0 起底栏点击不走动作总线，见 findTabDispatch 注释)");
             return false;
         } catch (Throwable t) {
             api.error("homeux: real tab select dispatch failed", t);
             return false;
+        }
+    }
+
+    /**
+     * 只解析不派发：返回 {总线方法, (int) 构造器, 动作类}，找不到返回 null。
+     * 判定即上面那三条形状规则，dispatchMineTabSelect 与启动期空跑共用一份逻辑，
+     * 免得两处规则漂移。候选表只放实机确证过「点击 lambda new 它」的构建；
+     * 新构建要么补上同样的 new-instance 取证，要么让它解析失败走兜底。
+     */
+    private Object[] findTabDispatch(Class<?> vmCls) {
+        ClassLoader vmCl = vmCls.getClassLoader();
+        String[] candidates = {"jD1.c", "FC1.c"};
+        for (int ci = 0; ci < candidates.length; ci++) {
+            Class<?> actionCls;
+            try {
+                actionCls = api.load(vmCl, candidates[ci]);
+            } catch (Throwable t) {
+                continue;
+            }
+            java.lang.reflect.Constructor<?> intCtor = null;
+            try {
+                intCtor = actionCls.getConstructor(int.class);
+            } catch (NoSuchMethodException ignored) {
+            }
+            if (intCtor == null) {
+                continue;
+            }
+            for (Method mm : vmCls.getDeclaredMethods()) {
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length == 1 && Void.TYPE.equals(mm.getReturnType())
+                        && ps[0].isInterface() && ps[0].isAssignableFrom(actionCls)) {
+                    mm.setAccessible(true);
+                    intCtor.setAccessible(true);
+                    return new Object[]{mm, intCtor, actionCls};
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 启动期一次性空跑：证明 6.6.0 的总线方法/动作类在当前构建里真能解析出来
+     * （不 invoke——invoke 会当场跳到「我的」页）。点击时若解析已失败，
+     * 日志里这一行就是「锚点没漂」的证词，漂了则直接给出 iface candidate 明细。
+     */
+    private void logTabDispatchAnchor(final Object vm) {
+        if (vm == null || tabAnchorLogged) {
+            return;
+        }
+        tabAnchorLogged = true;
+        try {
+            Object[] hit = findTabDispatch(vm.getClass());
+            if (hit == null) {
+                api.debug("homeux: tab dispatch anchor not resolvable on this build"
+                        + " (avatar uses synthesized tap / tab service / deep link chain)");
+                return;
+            }
+            api.debug("homeux: tab dispatch anchor ready -> " + vm.getClass().getSimpleName()
+                    + "." + ((Method) hit[0]).getName() + "("
+                    + ((Method) hit[0]).getParameterTypes()[0].getName() + ")"
+                    + " action=" + ((Class<?>) hit[2]).getName());
+        } catch (Throwable t) {
+            api.debug("homeux: tab dispatch anchor probe failed: " + t);
         }
     }
 
@@ -651,7 +719,10 @@ public final class HomeUxHooks {
             }
         }
         if (model == null) {
-            api.error("homeux: tab model list field not found on " + mainFrag.getClass().getName(), null);
+            // 6.5.0+ 底栏归 khome（"khome: filter armed on …" 那条才是现行路径），
+            // 这条 main2 模型列表只服务 6.3.0/6.4.0，miss 属预期，不打 ERROR。
+            api.debug("homeux: tab model list field not found on "
+                    + mainFrag.getClass().getName() + " (legacy main2 path; khome covers 6.5.0+)");
             return;
         }
         api.info("homeux: tab model list field=" + modelField.getName() + " size=" + model.size());
@@ -1244,6 +1315,7 @@ public final class HomeUxHooks {
                     try {
                         if (khomeVmRef.compareAndSet(null, result)) {
                             api.info("khome: HomeFrameViewModel captured " + result.getClass().getName());
+                            logTabDispatchAnchor(result);
                             scheduleKhomeDiscovery();
                         }
                     } catch (Throwable t) {
@@ -1538,6 +1610,7 @@ public final class HomeUxHooks {
             keptTabCount = kept.size();
             mineSlotIndex = mineIdx;
             mineTabKept = true;
+            mineHiddenInRender = false;
         }
     }
 
@@ -1605,6 +1678,7 @@ public final class HomeUxHooks {
                         }
                     }
                     keptTabCount = kept.size();
+                    mineHiddenInRender = true;
                     if (renderFilterLogged.compareAndSet(false, true)) {
                         api.info("khome: render hides mine tab (bar " + list.size() + "->" + kept.size()
                                 + ", data keeps " + mineSlotIndex + ")");
@@ -1773,7 +1847,8 @@ public final class HomeUxHooks {
             }
         }
         if (zl == null) {
-            api.error("homeux: MainFragment.Zl() not found - cannot locate tab provider", null);
+            // 同样是 main2（6.3.0/6.4.0）专属路径：6.5.0+ 底栏走 khome，这里 miss 属预期。
+            api.debug("homeux: MainFragment.Zl() not found (legacy main2 path; khome covers 6.5.0+)");
             return;
         }
         Class<?> providerCls = zl.getReturnType();

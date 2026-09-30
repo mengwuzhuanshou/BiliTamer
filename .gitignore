@@ -40,3 +40,6 @@ tools/libxposed/releases.json
 _tmp/
 .DS_Store
 Thumbs.db
+
+# workspace jadx/dex dumps (never published)
+/tmp/

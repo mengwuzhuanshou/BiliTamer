@@ -237,6 +237,12 @@ public final class PieceDownloader {
                             long start, long end, Sink sink, CancelToken token) throws IOException {
         AccelConfig cfg = snap();
         List<String> ordered = resolver.startupCandidates();
+        if (ordered.isEmpty()) {
+            // 走到兜底通道就已经没有第二选择：退避只是排程提示，不是封禁。
+            // 失败风暴会把手里全部地址都退避掉（真机账面里的「没有可用 CDN」），
+            // 这时一条都没试过不如再问一遍：全在退避期也比流被砍尾强。
+            ordered = resolver.allUrls();
+        }
         IOException last = null;
         for (int i = 0; i < ordered.size(); i++) {
             String url = ordered.get(i);
@@ -363,9 +369,21 @@ public final class PieceDownloader {
                     if (token.cancelled()) {
                         return;
                     }
-                    throw pieceError == null
-                            ? new IOException("子块取数失败：" + pieces[nextToSend].start)
-                            : pieceError;
+                    // 响应已经开口，这里再把异常抛上去就是「画面定格、进度条照走」：
+                    // AccelProxy 只在 sink 未启动时才兜底，started 之后的异常等于把流砍尾。
+                    // 从断点退回单连接透传续到计划末尾（等价官方行为）才是真恢复。
+                    log("windowed stream broken at " + pieces[nextToSend].start
+                            + ", resuming on one connection: " + pieceError);
+                    try {
+                        passthrough(resolver, headers, pieces[nextToSend].start,
+                                pieces[pieces.length - 1].end, sink, token);
+                    } catch (IOException e) {
+                        if (token.cancelled()) {
+                            return;
+                        }
+                        throw e;
+                    }
+                    return;
                 }
                 if (result == null) {
                     if (token.cancelled()) {
@@ -374,9 +392,6 @@ public final class PieceDownloader {
                     }
                     continue;
                 }
-                if (result.end != pieces[nextToSend].end) {
-                    log("piece " + nextToSend + " short from CDN: " + result.end + " != " + pieces[nextToSend].end);
-                }
                 try {
                     sink.onChunk(result.bytes, result.length,
                             new RangeCore.Piece(pieces[nextToSend].index, pieces[nextToSend].start,
@@ -384,10 +399,26 @@ public final class PieceDownloader {
                 } catch (IOException e) {
                     // 这一块的 onChunk 已经把字节落进缓存了，从下一块起收残局：
                     // 播放器挂断不等于这些字节没用，窗口里已经下完的留下，半路的作废。
+                    // 先取消：挂断不是节点的错，在飞的子块别再为这条死连接取数
+                    //（passthrough 里 v1.7.9 立的同款契约）。
+                    token.cancel("sink closed");
                     retainUnsent(lock, sink, ready, pieces, nextToSend + 1, total);
                     throw e;
                 }
                 sent += result.length;
+                if (result.end < pieces[nextToSend].end) {
+                    // 节点按自己的总长把**中段**子块截短：多半是只镜像了半份文件的节点
+                    //（尾部子块截短是真 EOF，正常）。按计划在下一块的起点继续吐，就会在
+                    // 响应体里留下 [result.end+1, piece.end] 的空洞 —— 真机表现为播放到
+                    // 中段花屏，手动拉进度条跳过空洞才恢复。已完成的后块留存，断点起
+                    // 单连接续到计划末尾。
+                    log("piece " + nextToSend + " short from CDN: " + result.end + " < "
+                            + pieces[nextToSend].end + ", resuming at " + (result.end + 1));
+                    retainUnsent(lock, sink, ready, pieces, nextToSend + 1, total);
+                    passthrough(resolver, headers, result.end + 1,
+                            pieces[pieces.length - 1].end, sink, token);
+                    return;
+                }
                 nextToSend++;
                 if (window < cap) {
                     drained++;
