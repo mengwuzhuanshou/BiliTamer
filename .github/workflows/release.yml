@@ -18,7 +18,15 @@ jobs:
           VER="${GITHUB_REF_NAME#v}"
           ASSET="apk/BiliTamer-v${VER}.apk"
           test -f "$ASSET" || { echo "missing $ASSET"; exit 1; }
+          # A release page describes ONE version: take only its own section out of
+          # RELEASE_NOTES.md (the whole file is the changelog, not the release body).
+          awk -v want="## v${VER}" '
+            $0 == want { p = 1; print; next }
+            p && /^## / { p = 0 }
+            p { print }
+          ' RELEASE_NOTES.md > notes.md
+          test -s notes.md || { echo "no '## v${VER}' section in RELEASE_NOTES.md"; exit 1; }
           gh release create "$GITHUB_REF_NAME" \
             --title "${VER}" \
-            --notes-file RELEASE_NOTES.md \
+            --notes-file notes.md \
             "$ASSET"
