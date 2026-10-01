@@ -31,7 +31,8 @@ An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`,
 | 隐藏互动提示 Hide interaction hints | 一键三连动画/文案、投票面板、UP 关注引导气泡 / Hide triple-action animation, vote panel and follow-bubble hints | 关 off |
 | 首页不自动刷新 No home auto-refresh | 从后台/其它页面切回首页时不自动重载推荐流；下拉/点 tab/首次进入不受影响 / Skip the automatic feed reload when returning to the home page; manual refresh unaffected | 关 off |
 | 首页顶栏消息入口 Top-bar message entry | 顶栏搜索栏右侧加消息图标，未读红点带数字 / A message icon on the top bar with an unread numeric badge | 开 on（6.4.0） |
-| 首页头像→我的 Avatar as Mine entry | 顶栏头像点击经真实 tab 派发打开完整「我的」页 / Avatar tap opens the full Mine tab page | 开 on（6.4.0） |
+| 首页头像→我的 Avatar as Mine entry | 顶栏头像点击投一发宿主自己的「按路由切页」动作，打开完整「我的」页（与底栏这一格画不画出来无关）/ Avatar tap dispatches the host's own route action to open the full Mine page — works whether or not the bottom bar draws that slot | 开 on（6.4.0） |
+| 首页直播板块 Live channel unlock | 国际版顶栏默认没有「直播」栏：服务端按身份裁剪下发的 tab 列表。解锁即把 `bilibili://live/home` 追加进顶栏页列表（标题与 pager 同源，不动其它 tab）/ The server trims the live channel out of the tab list for intl identities; this appends it back into the top-bar page list (titles and pager share one list) | 开 on |
 | 底栏删 tab Bottom-bar tabs | 移除「消息」tab、隐藏「我的」tab / Remove Message tab, hide Mine tab | 开 on（6.4.0） |
 | 首页推荐分区屏蔽 Feed partition blocker | 按推荐卡分区标签（tname）整卡屏蔽；词表批量输入/检索/逐词移除，无上限 / Block feed cards by partition tag; bulk-edit/search/remove word list, no limit | 空词表不生效 |
 | 配置同步 Config sync | 设置保存经启动投递+host-conf 代次协议生效，不依赖 root / Settings delivered at launch with a host-conf generation protocol — no root needed | — |

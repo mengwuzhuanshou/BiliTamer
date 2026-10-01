@@ -128,7 +128,15 @@ libxposed 的 `onPackageReady` 在目标进程执行，直接读
   配置文件劫持新版本的默认值；
 * 想做“免 root 定制”：LSPosed 对 self-hook 另有门槛（作用域声明自身包名后，
   升级安装新增的作用域条目不会自动合并进框架数据库，守护进程也不给模块自身
-  进程注入）；正路是 libxposed service-api（经 binder 直写），不是 self-hook。
+  进程注入）；正路是 libxposed service-api（经 binder 直写），不是 self-hook；
+* **模块私有目录里的 conf 副本对宿主进程永远不可读**：宿主以目标 App 的 uid 运行，
+  而 `/data/user/0/<模块包>` 是 0700，SELinux 还按 App 分配不同类别（MLS 约束），
+  两道都拦。所以「模块 files / 模块 shared_prefs」两条读路径在 enforcing ROM 上是死代码，
+  真正可用的只有两条：① 宿主自己的 files（由钩子在收到带 extras 的启动 Intent 时写入，
+  这是无 root 主链路）；② root 写的 world-readable 兜底副本（仅开发用）。
+  日志里 `confSrc=defaults` 就是这个信号：设备装完模块后没用过设置页 → 宿主没有自己的
+  conf → 全部回退出厂默认值。此时「功能没生效」既不是 hook 失效也不是配置写错，
+  先查 confSrc 再动代码。
 
 ## 10. verbose 关闭时的“首条探针”日志模式
 
@@ -596,7 +604,7 @@ Activity 的 onCreate（冷）/onNewIntent（热）截获，解析后写入宿�
 | 听模式完成监听器 | `CE1.f`（容器 `vJ1.m` 字段 H） | `lK1.j`（容器 `lK1.o` 字段仍是 H，onCompletion 体同形） | `listen: completion listener resolved -> lK1.j` |
 | feed 解析入口 | `pegasus.request.g.a(Lokhttp3/E;)` | `pegasus.request.h.a(Lokhttp3/E;)`（okhttp3.Response 仍是 `E`） | `feedtag: hook ok -> com.bilibili.pegasus.request.h.a` |
 | 直播后台播放门 | `HX.c$b/$c.q1()Z`（接口 `GX.b`，日志方法 `p1`） | `JX.b$b/$c.m1()Z`（接口 `IX.b`，日志方法 `l1`）——逐条同形 | `livebg: background entry unlock ok -> JX.b$b.m1`（$c 同） |
-| gRPC 描述符族 | `kr1.a..n` | `xr1.a..n`（14 类一一对应） | 待用户打开评论区后看 `rewritten>0` |
+| gRPC 描述符族 | `kr1.a..n` | `xr1.a..n`（14 类一一对应） | 已收口：评论区/空间页属地标签实机 A/B 双证，见下方「评论区改写收口」 |
 | 听模式 cheese 决策工厂 | `theseus.cheese.player.playselect.PlaybackMode$a.a(I)` | 真名未漂移，`PAUSE_WHEN_ENDED` 仍在 | 现行主修复无需改动 |
 | 首页底栏 | khome（`gE1.e` 过滤） | 同左 | `khome: filter armed on gE1.e, ctors=3` |
 | 底栏动作总线（头像→我的） | `w0(LjD1/b;)` + `jD1.c(index)` | 总线是 `v0(LbE1/b;)`（`dispatchAction`），但**点击链已不走总线**：`w0` 被复用成 `w0(LdE1/h$a;)` 气泡态 | 6.6.0 候选表留空 → `tab dispatch anchor not resolvable`（假锚点教训见下） |
@@ -617,9 +625,21 @@ Activity 的 onCreate（冷）/onNewIntent（热）截获，解析后写入宿�
   和 mini-player biz 层（`biz.b` 无字段 `r`）此前每天以 ERROR+完整栈刷一遍。它们在新版是
   **预期 miss**，降为 debug 并注明现行路径（khome / cheese+监听器）——ERROR 只留给真故障，
   否则真故障会淹没在每日例行噪音里。
-* **仍未收口的一处**（需人手操作：系统安全设置挡住了输入注入，没法自动点开评论区）：
-  评论区身份改写：6.6.0 需打开评论区看 `ip: grpc write seen=N (rewritten>0)`
-  （描述符族 `kr1.*→xr1.*` 已按 dex 逐条比对确认候选表正确，只差这一步实机触发）。
+* **评论区改写收口（6.6.0 实机 A/B 双证）**：默认开时评论区时间戳带属地
+  （「3天前 山东」「9月27日 广东」），空间页带「IP属地：四川」；把
+  `ip_location_enabled=false` 落进宿主 files 副本后**换两个不同视频**都只剩
+  「19分钟前 」「9月27日 」（尾随空格还在、属地为空）——服务端确实按请求身份决定
+  是否下发 `location`，因果成立、6.6.0 链路没断。
+  **但验收指标要换**：这条链在 6.6.0 上 `grpc write seen=N (rewritten=0)` 里的
+  `rewritten` 恒为 0，因为 `x-bili-device-bin` 里没有 mobi_app token
+  （`rewriteMobiAppBytes` 返回 null 即原样放行），而 `x-bili-metadata-bin` 不经过
+  这条写口；真正起作用的是 REST 公共参数改写
+  （`ip: space rest params rewritten mobi_app android_i -> android`，宿主类
+  `com.bilibili.app.comm.list.common.api.e.addCommonParam`——**注释里的「space」是
+  误名，它是评论/列表 REST 的公共参数口**）加上空间页那 15 s 时间窗。
+  所以「计数器为 0」不等于功能失效，属地标签才是事实；旧的 `Aq0.a/Cq0.a`
+  REST 拦截器在 6.6.0 已不存在（日志 `rest interceptor ... not present; skip`），
+  那是历史通道，不影响主页标签——主页标签照样出。
 
 * **头像→我的页：本轮差点挂上一个「同形但不同职」的假锚点**。6.5.0 的真实派发是
   `HomeFrameViewModel.w0(new jD1.c(index))`（底栏点击 lambda 里 new，实机确证切页）。
@@ -644,4 +664,115 @@ Activity 的 onCreate（冷）/onNewIntent（热）截获，解析后写入宿�
   隐藏后的数量，而 `mineSlotIndex` 还是数据层下标，`(mineSlotIndex+0.5)/keptTabCount`
   会 >=1——合成点击必然点到别的 tab。现在渲染隐藏时置 `mineHiddenInRender`，
   头像点击直接跳过合成点击（走 tab 服务/深链），日志注明跳过原因。
+  （**这条修法已被 #37 推翻重做**：那个布尔会被数据钩子抹掉，事故在 6.6.0 真机复发了。）
+
+## 36. 一份服务端配置被两个消费者各自取列表：只补一处就「标题 3 个、页面 2 页」（首页直播板块）
+
+* **现象**：国际版首页顶栏只有 推荐/动画，没有国内版的 直播。板块本体随包在
+  （`LiveTabFragment` + 路由 `bilibili://live/home` 全套都在，deeplink 能实例化，
+  只是内容为空——因为作为首页 tab 被框架驱动的那几个回调没人调）。
+  定性：**服务端按身份裁剪 `tab/v2` 下发的 tab 列表**，不是客户端过滤。
+  反证很清楚：同一份顶栏数据里根本没有那条记录，而路由和页面都是好的。
+* **走过的三条死路**（每条都留了证据，别再试回去）：
+  1. **只补 `$initPageData$1$1` 的 args[0]**（顶栏标题那条流）→ 标题 3 个、pager 只有 2 页。
+     追加时第 3 格下标越界，点它没反应；头部插入时标题整体右移一格，
+     点「直播」出推荐流、点「推荐」出动画流。**同一份错位在一台机器复现、另一台不复现**
+     （冷启动首帧就带 3 项时头部插入不露馅），别把「没复现」当「没问题」。
+  2. **以为页过滤器 `w()` 把注入项滤掉了** → 带 uri 明细的一次性探针实测
+     `in=3 out=3 out_uris=[promo, pgc, live] nothing dropped`，过滤器是干净的。
+  3. **以为「顶栏标题」和「pager 页面」各有一个 `PageBuildComponent`**
+     （`home.tab.components.pagebuild` 与 `home.components.pagebuild`）→ 后者本体被 R8
+     改名成 `mi0.a`（按真名 load 直接 CNFE），而且它做的是**底栏**页
+     （`gE1.d` + `key_main_tab_*`），跟顶栏无关。
+* **正解**：`dexcall.py callers` 查出来顶栏这两条支路**共用同一个组件的同一个
+  `w(List)`**（全 apk 只有 3 处调用：`initPageData$1$1` → 标题；
+  `setupViewPager$dataJob$1$1` 的两个分支 → `adapter.T(uri 列表)` + `setPagingEnabled`）。
+  注入点设在 **`w()` 的入参**上，标题和页必然同源；点标题走
+  `PageBuildComponent.k()`→`adapter.e().indexOf(uri)`，页列表里有那条 uri 才切得动
+  （-1 直接 return —— 那枚「点了没反应」就是它）。
+* **通则**：「一处数据、两处渲染」的组件，先去数**消费者有几个、各自从哪儿取列表**。
+  补在共享收口上（同一次调用的入/出参）永远比补在某个消费者的入参上安全，
+  因为消费者的两份列表是**两次独立取值**，只喂到一边就必然错位。
+  另一个纪律：注入位置必须**追加**而不是头部插入——ViewPager2 + 按位置取 id 的
+  `FragmentStateAdapter`，头部插入会让既有页被错配到新下标（整体错一格），
+  追加则既有下标一个都不动。
+* **对照实机 A/B（必须做）**：同一构建、同一账号，关掉开关后重启宿主，
+  顶栏标签从 `推荐/动画/直播` 退回 `推荐/动画` 且注入日志（`appended …`）不再出现
+  ——这才叫钩子在起作用。「屏幕没变」不算证据。
+* **抗漂移**：`PageBuildComponent` 是 Kotlin 真名（6.3.0–6.6.0 逐字相同），
+  但页过滤器方法名每版会重排（四版都是 `w`，仍按「唯一 `(List)->List` 实例方法」兜底，
+  多义就放弃并记 warn，宁可漏挂也不挂错）。数据类名每版都换
+  （6.3.0 `k` / 6.4.0 `n` / 6.5.0 `nD1.k` / 6.6.0 `fE1.k`），
+  字段字母四版同序（a=id b=name c=uri f=default_selected g=pos h=tab_id m=type），
+  但字母只当入口，真正验收的是**值**：uri 含 `://`、id 是纯数字、name 非空且不含 `://`。
+
+## 37. 渲染级隐藏 ≠ 数据级隐藏：点击位置只能用渲染快照；DI 组件抓不到实例就照抄它投的动作（头像→我的）
+
+* **事故**：开着「隐藏底栏我的」的 6.6.0 上，点顶栏头像进的是**动态**页。
+  合成点击的比例是 `(数据层槽位+0.5)/数据层数量` = `(2+0.5)/3=0.833`，
+  而底栏只**画了 2 格**——0.833 落在左边那一格上。数据和渲染是两套数量，
+  拿数据的几何去点渲染的东西必歪。
+* **修法**：渲染钩子（底栏容器 Compose 函数的入参过滤）每次执行都写一份**渲染快照**
+  （`renderedTabCount` / `renderedMineIndex`，隐藏了就是 -1），合成点击只在
+  `renderedMineIndex>=0` 时做，比例用快照算。**唯一写入点只能是渲染钩子**：
+  上一版用 `mineHiddenInRender` 布尔 + 数据钩子里「重置为 false」，而页面状态每次重建
+  都会进数据钩子，「已隐藏」这个事实被悄悄抹掉，事故复发。
+  数据钩子不许写渲染快照，反过来也不许删数据（数据一丢，pager 页和派发目标一起没了）。
+* **6.6.0 上「点头像进我的」的正确派发**（dex 逐条对读，四版同形）：宿主国内版自己的
+  头像 lambda 里就一行 ——
+  `HomeFrameViewModel.v0(new bE1.g("bilibili://user_center/mine?bottom_tab_id=我的Bottom", 0, 2))`，
+  国际版同一处被一个 oversea/intl 判定挡成 `avatar click disabled for oversea/intl, do nothing`。
+  我们照抄这一发即可（真机验收：日志 `avatar -> host route action …我的Bottom`，
+  页面停在宿主 `MainActivityV2` 内的「我的」页，底栏还在，不是深链那种独立壳）。
+  | 版本 | 路由动作类 | 总线方法 |
+  | --- | --- | --- |
+  | 6.3.0 | `FA1.g(String,I,I)` | `x0` |
+  | 6.4.0 | `FC1.g` | `w0` |
+  | 6.5.0 | `jD1.g` | `w0` |
+  | 6.6.0 | `bE1.g` | `v0` |
+  （四版 `PageRouteComponent` 的那个 `void(Intent)` 处理口函数体都是
+  「读 vm 字段 → new `<包>.g(url,0,2)` → `vm.<总线>(g)`」三步，名字分别是
+  `U3/Q3/T3/b4`。）
+  **发布前又用四个本地包逐个复核过一遍**（`dexscan.py class` 直读类表，不靠记忆）：
+  VM 类名 6.3.0–6.6.0 **没漂**（恒为 `tv.danmaku.bili.khome.vm.HomeFrameViewModel`），
+  总线方法的单参类型正是同族动作接口（`bE1/jD1/FC1/FA1.b`），四条动作类的构造都是
+  `<init>(Ljava/lang/String;,I,I)`；而 `bottom_tab_id=我的Bottom` 这串在四个包的宿主
+  深链常量里都存在（`bilibili://root?bottom_tab_id=我的Bottom&biz_key=his` 之类），
+  所以「现读不到就退回这串常量」在旧版本上也不是赌。
+* **两个关键坑**：
+  - **路由动作的匹配键在 url 的 query 里**，不在动作对象的字段里。处理器
+    （`dispatchAction` 的 `g` 分支）先 `Uri.parse(url).getQueryParameter("bottom_tab_id"/"bottom_tab_name")`，
+    再拿它去底栏列表逐项比内层 tab 数据的 `h`(tab_id)/`b`(name)；**两个键都取不到就整发空转**，
+    页面一动不动——「投了动作没反应」不是锚点错，是 url 少了那串参数。
+    所以键值要从宿主自己下发的那一格数据里**现读**（读不到才退宿主硬编码的 `我的Bottom`），
+    别把国内版的常量当国际版的真值：本轮实机读出来恰好也是 `我的Bottom`，是证据不是假设。
+  - **别去抓 DI 组件的实例**。`PageRouteComponent` 反射
+    `getDeclaredConstructors()` 长度 **0**（日志 `ctors=0`），构造器钩子永远不触发，
+    于是「拿到实例再调它的方法」这条路整条失效；而它做的事只是往总线投一发动作，
+    我们本来就已经握着 VM 实例——直接投同一个动作，锚点少一层、也不会被 DI 改名影响。
+* **纪律**：只解析不派发的**启动期空跑**（`route dispatch anchor ready -> …`）要有，
+  它让「锚点没漂」在点击发生前就有一条独立证词；解析规则与 #35 的
+  「形状命中只是入场券，谁 new 它才是角色证明」同源——本轮候选表四条都是从
+  `dexsite.py new` 的构造点上抄下来的，不是从形状猜的。
+
+## 38. 对照轮可以整轮跑在「默认值」上：日志短标签不是 conf 键名，而 confSrc 要认主进程那一行
+
+* **事故**：给评论区身份改写做「功能关闭」对照，conf 里写了 `ip=false`，跑完看不出
+  任何差异，差点结论成「6.6.0 服务端本来就发属地、我们的钩子多余」。实际是**那份
+  conf 一个字都没被读**：真正的键名是 `ip_location_enabled`，`ip` 是启动日志里的
+  短标签；解析器「未知键跳过」+「有效键为空就当作没有这份副本」，两重静默叠起来，
+  进程照 `confSrc=defaults` 跑，等于又跑了一遍默认开。整轮时间白烧在一条拼错的关键字上。
+* **键名的唯一权威来源是配置类里那张键常量表**（`ALL_KEYS`），不是日志行、不是设置页
+  文案、不是上一版记忆里的写法。日志短标签天生是为了读日志省事而起的别名，别名会漂。
+* **认 confSrc 要认进程**：宿主是**多进程**的（主进程 + `:download` / `:ijkservice` /
+  `:web`），每个进程都打一行 `confSrc=`。对照轮只看**主进程那条同名行**；抓错子进程
+  会把「defaults」当成对照生效的证据（本轮就是先读到 `:download` 那行才去查的）。
+  更进一步：**判断这份 conf 生不生效的唯一依据是那行来源+代次**
+  （`confSrc=<来源> gen=<号>`），不是行为差异——默认值往往恰好等于对照值，行为上看不出来。
+* **写宿主 files 副本的三道工序缺一步就静默不可读**：属主要改成宿主自己的 uid/gid、
+  权限 660、SELinux 标签要 `restorecon`。少了标签那步，文件在、权限对、进程读不到，
+  表现同样是 `confSrc=defaults`；`/data/local/tmp` 那份对宿主进程根本不可用
+  （标签属于 shell 数据域），只能作为开发兜底的最后一级，别指望它。
+* **纪律**：对照实验开工前先花一秒确认「关闭态真的被加载了」，再花十分钟跑行为；
+  跑完删掉开发用副本回默认，别让下一轮继承一个自己都不知道的开关。
 

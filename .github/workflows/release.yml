@@ -1,6 +1,6 @@
 name: Create Release
 # Push a tag like v1.3.2 -> creates a GitHub Release named 1.3.2
-# with RELEASE_NOTES.md as body and apk/BiliTamer-v<ver>.apk attached.
+# with that version's RELEASE_NOTES.md section as body and apk/BiliTamer-v<ver>.apk attached.
 on:
   push:
     tags: ['v*']

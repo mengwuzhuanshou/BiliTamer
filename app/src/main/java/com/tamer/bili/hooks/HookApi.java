@@ -112,6 +112,9 @@ public interface HookApi {
     boolean isNoAutoRefreshEnabled();
     boolean isLiveBgUnlockEnabled();
 
+    /** 首页顶栏「直播」板块入口解锁（服务端按身份裁剪掉的那条 tab）。 */
+    boolean isLiveTabUnlockEnabled();
+
     /** 分享面板「分享到 QQ」开关。 */
 
     boolean isVerboseLoggingEnabled();

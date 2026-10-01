@@ -82,6 +82,7 @@ public final class BiliConfig {
     // ===== 首页不自动刷新 =====
     public static final String KEY_NO_AUTO_REFRESH = "no_auto_refresh";
     public static final String KEY_LIVE_BG_UNLOCK = "live_bg_unlock";          // 直播后台播放入口解锁
+    public static final String KEY_HOME_LIVE_TAB = "home_live_tab_unlock";      // 首页直播板块入口解锁
 
     // ===== 首页推荐分区屏蔽：tname 词表（逗号分隔存储；唯一字符串键）=====
     public static final String KEY_FEED_BLOCK_TNAMES = "feed_blocked_tnames";
@@ -120,6 +121,7 @@ public final class BiliConfig {
         KEY_HIDE_UP_PROMPT,
         KEY_NO_AUTO_REFRESH,
         KEY_LIVE_BG_UNLOCK,
+        KEY_HOME_LIVE_TAB,
         KEY_DEBUG_ALIVE,
         KEY_VERBOSE,
         KEY_PROBE,
@@ -143,6 +145,7 @@ public final class BiliConfig {
         if (KEY_PROBE.equals(key)) return false;
         if (KEY_NO_AUTO_REFRESH.equals(key)) return false;
         if (KEY_LIVE_BG_UNLOCK.equals(key)) return true;      // 直播后台播放入口解锁，出厂默认开
+        if (KEY_HOME_LIVE_TAB.equals(key)) return true;       // 首页直播板块入口解锁，出厂默认开
         if (KEY_ACCEL.equals(key)) return false; // 实验特性出厂默认关（硬约束）
         if (KEY_LISTEN_PAUSE_AFTER_END.equals(key)) return false;
         return false;

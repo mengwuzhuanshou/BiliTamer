@@ -144,6 +144,12 @@ public class SettingsActivity extends Activity {
         addSwitch(BiliConfig.KEY_NO_AUTO_REFRESH, "首页不自动刷新", "No auto refresh on home",
                 "从后台/其它页面切回首页时不自动重新加载推荐流（省流量、省电）；\n"
                 + "手动下拉刷新、点击 tab、首次进入不受影响");
+        addSwitch(BiliConfig.KEY_HOME_LIVE_TAB, "首页顶栏补回「直播」板块", "Unlock home live tab",
+                "国际版首页顶栏的直播频道被服务端按身份裁掉了，板块本体随包就在\n"
+                + "（路由 bilibili://live/home 与直播首页 fragment 都在 apk 里）。打开后在顶栏标题\n"
+                + "与页面共用的收口处补回这一格（追加在末尾，既有页下标不动）；关闭即恢复原样。\n"
+                + "改后需强停 B 站重开 / appended at the shared funnel that feeds both the titles "
+                + "and the pager pages, so existing tab indices stay untouched");
 
         section("首页推荐分区屏蔽", "Feed partition blocker");
         LinearLayout tagRow = new LinearLayout(this);

@@ -12,6 +12,7 @@ import com.tamer.bili.hooks.InteractHintHooks;
 import com.tamer.bili.hooks.IpLocationHooks;
 import com.tamer.bili.hooks.ListenPauseHooks;
 import com.tamer.bili.hooks.LiveBgHooks;
+import com.tamer.bili.hooks.LiveTabHooks;
 import com.tamer.bili.hooks.PlayerCodecHooks;
 
 import java.lang.reflect.Field;
@@ -106,27 +107,44 @@ public class MainHook extends XposedModule implements HookApi {
 
     private void logConfig() {
         try {
+            // 键名一律用 conf 里的真名（BiliConfig.ALL_KEYS），不要用别名：
+            // 曾经有人照这行日志里的 `ip=` 去写 conf，未知键被严格解析整份丢弃，
+            // 「功能关闭」对照其实跑在默认开启上（见 PITFALLS #38）。
             info("confSrc=" + BiliConfig.sConfSource
-                    + " master=" + isMasterEnabled()
-                    + " ip=" + isIpLocationEnabled()
-                    + " ipScope=" + getIpScopeMode()
-                    + " codec=" + getCodecMode()
-                    + " codecHwFilter=" + isCodecHwFilterEnabled()
-                    + " audio=" + getAudioQuality()
-                    + " hdr=" + getHdrMode()
-                    + " listenPause=" + isListenPauseEnabled()
-                    + " hideTriple=" + isHideTriple()
-                    + " hideVote=" + isHideVote()
-                    + " hideUp=" + isHideUpPrompt()
-                    + " noRefresh=" + isNoAutoRefreshEnabled()
-                    + " accel=" + isAccelEnabled()
-                    + "(conc=" + getAccelConcurrency() + " mode=" + getAccelMode()
-                    + " cacheMb=" + getAccelCacheMb() + ")"
-                    + " probe=" + isProbeEnabled()
-                + " feedWords=" + getFeedBlockedTnames().split(",").length);
+                    + " master_enabled=" + isMasterEnabled()
+                    + " ip_location_enabled=" + isIpLocationEnabled()
+                    + " ip_scope_mode=" + getIpScopeMode()
+                    + " codec_mode=" + getCodecMode()
+                    + " codec_hw_filter=" + isCodecHwFilterEnabled()
+                    + " audio_quality=" + getAudioQuality()
+                    + " hdr_mode=" + getHdrMode()
+                    + " listen_pause_after_end=" + isListenPauseEnabled()
+                    + " hide_triple=" + isHideTriple()
+                    + " hide_vote=" + isHideVote()
+                    + " hide_up_prompt=" + isHideUpPrompt()
+                    + " no_auto_refresh=" + isNoAutoRefreshEnabled()
+                    + " accel_enabled=" + isAccelEnabled()
+                    + "(accel_concurrency=" + getAccelConcurrency()
+                    + " accel_mode=" + getAccelMode()
+                    + " accel_cache_mb=" + getAccelCacheMb() + ")"
+                    + " probe_enabled=" + isProbeEnabled()
+                    + " feed_blocked_tnames=" + feedWordCount() + " word(s)");
         } catch (Throwable t) {
             warn("logConfig failed: " + t);
         }
+    }
+
+    /** 词表条数：与 FeedTagHooks 的切分口径一致（多分隔符 + 去空 + 去重），
+     *  空串算 0 条——`"".split(",")` 长度是 1，会把「没屏蔽任何分区」写成 1。 */
+    private int feedWordCount() {
+        java.util.Set<String> seen = new java.util.HashSet<String>();
+        for (String w : getFeedBlockedTnames().split("[，,;；、\\r\\n]+")) {
+            String t = w.trim();
+            if (t.length() > 0) {
+                seen.add(t);
+            }
+        }
+        return seen.size();
     }
 
     private void installFeatures(boolean main, boolean download, boolean ijk, ClassLoader cl) {
@@ -183,6 +201,11 @@ public class MainHook extends XposedModule implements HookApi {
             install("LiveBgHooks", new ThrowingAction() {
                 @Override public void run() throws Throwable {
                     new LiveBgHooks(MainHook.this, cl).install();
+                }
+            });
+            install("LiveTabHooks", new ThrowingAction() {
+                @Override public void run() throws Throwable {
+                    new LiveTabHooks(MainHook.this, cl).install();
                 }
             });
             install("ListenPauseHooks", new ThrowingAction() {
@@ -609,6 +632,13 @@ public class MainHook extends XposedModule implements HookApi {
         BiliConfig c = config;
         return c != null && c.get(BiliConfig.KEY_LIVE_BG_UNLOCK,
                 BiliConfig.defaultValueOf(BiliConfig.KEY_LIVE_BG_UNLOCK));
+    }
+
+    @Override
+    public boolean isLiveTabUnlockEnabled() {
+        BiliConfig c = config;
+        return c != null && c.get(BiliConfig.KEY_HOME_LIVE_TAB,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_HOME_LIVE_TAB));
     }
 
     public boolean isNoAutoRefreshEnabled() {
