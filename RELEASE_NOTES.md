@@ -26,6 +26,11 @@
   原先只在连接关闭时落盘，播放中途进程被杀就没有清单可读，现在每 8 MiB 落一次，实机重开同一条
   视频的读数是 `disk=1207864 net=0`。 / The first byte no longer waits for a whole 256 KiB piece,
   and the block index is flushed every 8 MiB instead of only when a connection closes.
+* **签名密钥已更换，需要卸载重装 / New signing key, uninstall first**: 本版用新密钥签名，与
+  1.7.x 及更早版本不同源，原地升级会被系统拒绝（`INSTALL_FAILED_UPDATE_INCOMPATIBLE`），
+  请先卸载旧版再装本版；卸载会清掉模块自己保存的开关设置，装好后重新勾一遍即可。
+  / This build is signed with a new key, so updating in place is rejected — uninstall the old
+  version first, then install; module settings are cleared by the uninstall.
 
 ## v1.7.14
 
