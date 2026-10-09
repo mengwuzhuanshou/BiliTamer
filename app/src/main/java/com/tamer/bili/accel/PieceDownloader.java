@@ -168,35 +168,55 @@ public final class PieceDownloader {
         }
     }
 
+    /** 起播段最多一次取多少：再多就该交给窗口并发了。 */
+    private static final long HEAD_STREAM_CAP = 256L * 1024L;
+
+    /** 起播段一口的上限：读到多少吐多少，不为凑满这一口压着首字节（响应头也是在第一次交付时才发的）。 */
+    private static final int HEAD_FLUSH_BYTES = 64 * 1024;
+
+    /** 探路（问 1 个字节）的读超时：探不到就退回直接流式起播段，不因此判死节点。 */
+    private static final int PROBE_READ_TIMEOUT_MS = 1500;
+
+    /** 等第一个探路答复的上限：过了就认「没有可用 CDN」，交回上层兜底。 */
+    private static final long PROBE_FIRST_WAIT_MS = 2600L;
+
+    /** 一次探路最多同时问几条（1 字节很便宜，但每条都要占一个并发许可）。 */
+    private static final int PROBE_WIDTH = 4;
+
+    /** 第 2 条起每隔这么久才发出：首个节点活着就只花 1 次请求，死了才有替补在路上。 */
+    private static final long PROBE_STAGGER_MS = 120L;
+
+    /** 已经拿到活地址、但还有候选卡在连接里：再等这么久就收场，不等它的读超时。 */
+    private static final long PROBE_GIVEUP_WAIT_MS = 600L;
+
+    /** 起播段的总时间预算：超了就把剩下的交给窗口，别让「开头这一段」独占许可。 */
+    private static final long HEAD_DEADLINE_MS = 6000L;
+
     /**
      * 把 [start, end]（end 为 -1 表示 open-ended）按序喂给 sink。
-     * 起播先单块探测拿到总长；拿不到总长就退化成单连接透传，绝不猜长度。
+     * 起播段边收边吐（先拿到总长就发响应头，之后每 64 KiB 交付一次），
+     * 剩下的部分交给滑动窗口并发取数。
      */
     public void stream(final CdnResolver resolver, final Map<String, String> headers,
                        long start, long end, Sink sink, CancelToken token) throws IOException {
         final AccelConfig cfg = snap();
         List<String> candidates = resolver.rangeCandidates();
-        long headLength = Math.max(64L * 1024L, cfg.minChunkBytes);
-        long headEnd = start + headLength - 1;
-        if (end >= 0 && end < headEnd) {
-            // 客户端只要一小段（比如索引盒）：别多取，多取的字节也吐不出去。
-            headEnd = end;
-        }
-        RangeCore.Piece head = new RangeCore.Piece(0, start, headEnd);
-        PieceResult headResult;
+        Head head;
         try {
-            headResult = downloadPiece(resolver, headers, head, candidates, true, 220, token);
+            head = headStreamed(resolver, headers, candidates, start, end, sink, token);
         } catch (InterruptedException e) {
             token.cancel("interrupted");
-            throw new IOException("起播探测被中断：" + e, e);
+            throw new IOException("起播被中断：" + e, e);
         }
-        long total = headResult.total;
-        sink.onChunk(headResult.bytes, headResult.length,
-                new RangeCore.Piece(0, head.start, head.start + headResult.length - 1), total);
+        long total = head.total;
         if (token.cancelled()) {
             return;
         }
-        long nextStart = headResult.end + 1;
+        long nextStart = start + head.delivered;
+        if (head.delivered == 0L && total <= 0L) {
+            // 一个字节都没吐出去、总长也不知道：sink 还没开口，交回上层的单连接兜底。
+            throw head.error == null ? new IOException("起播失败：没有可用 CDN") : head.error;
+        }
         if (end < 0) {
             if (total <= 0) {
                 // 节点没给总长：不猜长度，剩余部分退回单连接读到 EOF。
@@ -213,9 +233,9 @@ public final class PieceDownloader {
             return;
         }
         long remaining = end - nextStart + 1;
-        // 子块对齐播放器一口取走的量（就是 head 那一口）：4 MiB 一块在这样的连接里
+        // 子块对齐播放器一口取走的量（起播段就是 minChunk 这一口）：4 MiB 一块在这样的连接里
         // 永远等不到下完，retainUnsent 只留得下已完成的，整块白下。
-        long chunk = clampLong(headLength, cfg.minChunkBytes, cfg.maxChunkBytes);
+        long chunk = clampLong(cfg.minChunkBytes, cfg.minChunkBytes, cfg.maxChunkBytes);
         int pieceCount = (int) Math.min(4096L, Math.max(1L, remaining / chunk));
         RangeCore.Piece[] pieces = RangeCore.splitRange(nextStart, end, pieceCount, chunk);
         // 这里只定窗口的上限，实际从 FIRST_WINDOW 起按消费速度爬坡（见 streamWindowed）。
@@ -225,10 +245,339 @@ public final class PieceDownloader {
         int cap = (int) Math.max(2L, Math.min((long) pieces.length,
                 Math.min(cfg.windowBytes / Math.max(1L, chunk), (long) windowSlots * 2L)));
         try {
-            streamWindowed(resolver, headers, pieces, cap, headResult.url, total, sink, token);
+            streamWindowed(resolver, headers, pieces, cap, head.url, total, sink, token);
         } catch (InterruptedException e) {
             token.cancel("interrupted");
             throw new IOException("取数被中断：" + e, e);
+        }
+    }
+
+    /** 起播段的账面：交付了多少字节、总长、当前该继续用哪条地址。 */
+    private static final class Head {
+        final long delivered;
+        final long total;
+        final String url;
+        final IOException error;
+
+        Head(long delivered, long total, String url, IOException error) {
+            this.delivered = delivered;
+            this.total = total;
+            this.url = url;
+            this.error = error;
+        }
+    }
+
+    /** 探路成功的一条地址（按答应的先后收集，天然就是快慢排序）。 */
+    private static final class Probe {
+        final String url;
+        final long total;
+
+        Probe(String url, long total) {
+            this.url = url;
+            this.total = total;
+        }
+    }
+
+    private static final class ProbeFailure {
+        final IOException error;
+        final int status;
+
+        ProbeFailure(IOException error, int status) {
+            this.error = error;
+            this.status = status;
+        }
+    }
+
+    /**
+     * 起播段：先并行探路（只问 1 个字节）拿到总长和「谁最快」，再在那条地址上
+     * 把起播段按 64 KiB 边收边吐。
+     *
+     * <p>为什么要换掉旧的整块起播：响应头是在第一次 {@code sink.onChunk} 里发的，
+     * 而旧写法要把 256 KiB 起播段**整个装进内存**才交付，八条对冲候选各下各的、
+     * 七条白下；真机一次播放有六七条并发流，它们又共用同一个 gate，
+     * 于是每条流的第一个字节都排在别人的整块后面 —— 播放器显示的就是「0 KB/s 卡好一会」。
+     * 1 字节探路把「谁活着、谁快、文件多大」这三件事压到几百字节，第一个字节只等一个 64 KiB。
+     */
+    private Head headStreamed(CdnResolver resolver, Map<String, String> headers, List<String> candidates,
+                              long start, long end, Sink sink, CancelToken token)
+            throws IOException, InterruptedException {
+        AccelConfig cfg = snap();
+        long wanted = end >= 0L ? Math.max(1L, end - start + 1L) : Long.MAX_VALUE / 4L;
+        long take = Math.min(HEAD_STREAM_CAP, Math.min(Math.max(cfg.minChunkBytes, (long) HEAD_FLUSH_BYTES), wanted));
+        // 只要一小段（索引盒那种，一口就吃完）就别多花一次探路钱：直接按候选顺序流。
+        List<Probe> probes = wanted > (long) HEAD_FLUSH_BYTES
+                ? probeHead(resolver, headers, start, candidates, token)
+                : directProbes(candidates);
+        long total = probes.isEmpty() ? -1L : probes.get(0).total;
+        if (probes.isEmpty() && !token.cancelled()) {
+            // 没有候选答应那 1 个字节：别直接判死，按候选顺序最多再试两条（多半是许可不够或 TLS 慢）。
+            // 真不行 headAttempt 会把异常带回去，sink 仍未开口，上层照样走单连接兜底。
+            probes = directProbes(candidates.size() > 2 ? candidates.subList(0, 2) : candidates);
+            total = -1L;
+        }
+        if (probes.isEmpty()) {
+            return new Head(0L, -1L, null, null);
+        }
+        long stop = start + take - 1L;
+        if (end >= 0L && end < stop) {
+            stop = end;
+        }
+        long cursor = start;
+        String winner = null;
+        IOException last = null;
+        long startedAt = System.currentTimeMillis();
+        for (int i = 0; i < probes.size() && cursor <= stop; i++) {
+            if (token.cancelled()) {
+                break;
+            }
+            if (i > 0 && cursor - start >= HEAD_FLUSH_BYTES) {
+                // 已经往外吐过一批：换地址续不划算，剩下的交给窗口（它会带上健康度选择）。
+                break;
+            }
+            String url = probes.get(i).url;
+            try {
+                Head one = headAttempt(resolver, headers, cursor, stop, url, total, sink, token);
+                if (one.total > 0L && (total <= 0L || one.total < total)) {
+                    total = one.total;
+                }
+                winner = url;
+                cursor += one.delivered;
+            } catch (IOException e) {
+                last = e;
+                log("head attempt failed on " + RangeCore.hostOf(url) + ": " + e);
+            }
+            if (cursor >= stop || System.currentTimeMillis() - startedAt > HEAD_DEADLINE_MS) {
+                break;
+            }
+        }
+        long delivered = cursor - start;
+        return new Head(delivered, total, winner == null ? probes.get(0).url : winner,
+                delivered == 0L ? last : null);
+    }
+
+    /** 不探路时用的候选表：总长由第一次真实响应的 Content-Range 补上。 */
+    private static List<Probe> directProbes(List<String> candidates) {
+        List<Probe> out = new ArrayList<Probe>();
+        for (int i = 0; i < candidates.size(); i++) {
+            out.add(new Probe(candidates.get(i), -1L));
+        }
+        return out;
+    }
+
+    /**
+     * 并行探路：错开地按候选问 1 个字节，第一个答应的到手就收队。
+     *
+     * <p>为什么不一次问满：起播要的是「一条活着的地址」，不是八条地址的排行榜 —— 八条同时在飞
+     * 就是八次请求 + 八个并发许可，浅消费的流（播放器探两口就换连接）连本带利都得付这笔账。
+     * 错开 120 ms 发下一条，节点死得快就立刻有替补顶上，黑洞（连上但不吐字节）也不会让
+     * 第一个字节等到读超时。
+     *
+     * <p>失败怎么记账要分开看：4xx 是真拒绝（进封禁账，交给 {@link CdnResolver#failure}）；
+     * 超时/连不上只退避（{@link CdnResolver#failurePartial}），因为封禁表活到进程结束，
+     * 拿一次慢 TLS 把节点永久拉黑不合理。
+     */
+    private List<Probe> probeHead(final CdnResolver resolver, final Map<String, String> headers,
+                                  final long start, List<String> candidates, final CancelToken token)
+            throws InterruptedException {
+        final int width = Math.min(PROBE_WIDTH, candidates.size());
+        List<Probe> got = new ArrayList<Probe>();
+        if (width <= 0 || token.cancelled()) {
+            return got;
+        }
+        BlockingQueue<Object> done = new ArrayBlockingQueue<Object>(width * 2 + 2);
+        final List<CancelToken> tokens = new ArrayList<CancelToken>();
+        final long startedAt = System.currentTimeMillis();
+        int fired = 0;
+        int pending = 0;
+        try {
+            while (!token.cancelled()) {
+                long now = System.currentTimeMillis();
+                if (fired == 0 || now - startedAt >= PROBE_STAGGER_MS * fired) {
+                    if (fired < width) {
+                        fireProbe(resolver, headers, start, candidates.get(fired), done, tokens);
+                        fired++;
+                        pending++;
+                    }
+                }
+                if (pending == 0) {
+                    // 在飞的都表过态：要么拿到了活地址，要么全部失败/超时。
+                    break;
+                }
+                if (now - startedAt >= (got.isEmpty() ? PROBE_FIRST_WAIT_MS : PROBE_GIVEUP_WAIT_MS)) {
+                    break;
+                }
+                Object item = done.poll(20L, TimeUnit.MILLISECONDS);
+                if (item == null) {
+                    continue;
+                }
+                pending--;
+                if (item instanceof Probe) {
+                    got.add((Probe) item);
+                    break;
+                }
+            }
+        } finally {
+            for (int i = 0; i < tokens.size(); i++) {
+                tokens.get(i).cancel("探路结束");
+            }
+        }
+        return got;
+    }
+
+    /** 发出一次探路；许可不够时就在池里排队，等到位子再说（起播优先，priority 230）。 */
+    private void fireProbe(final CdnResolver resolver, final Map<String, String> headers, final long start,
+                           final String url, final BlockingQueue<Object> done, List<CancelToken> tokens) {
+        final CancelToken probeToken = new CancelToken();
+        tokens.add(probeToken);
+        pool.submit(new Runnable() {
+            @Override public void run() {
+                if (probeToken.cancelled()) {
+                    return;
+                }
+                probeAttempt(resolver, headers, start, url, done, probeToken);
+            }
+        });
+    }
+
+    /** 一次探路：验 206 与区间起点，读掉那 1 个字节证明正文真的在流，然后立刻归还许可。 */
+    private void probeAttempt(CdnResolver resolver, Map<String, String> headers, long start,
+                              String url, BlockingQueue<Object> done, CancelToken probeToken) {
+        AccelConfig cfg = snap();
+        Transport.Response response = null;
+        int status = 0;
+        boolean gotByte = false;
+        boolean acquired = false;
+        IOException failure = null;
+        try {
+            try {
+                gate.acquire(230, probeToken);
+                acquired = true;
+                if (probeToken.cancelled()) {
+                    // 许可不够时探路会在池里排队；等到位子时可能已经有别的候选答应了，就别再碰节点。
+                    return;
+                }
+                response = transport.open(url, start, start, headers,
+                        cfg.firstByteTimeoutMs, PROBE_READ_TIMEOUT_MS);
+                status = response.status;
+                if (status != 206 || response.rangeStart != start) {
+                    throw new IOException("探路 Range 校验失败：HTTP " + status
+                            + " content-range=" + response.rangeStart + "-" + response.rangeEnd);
+                }
+                gotByte = response.body.read(new byte[1], 0, 1) > 0;
+                done.offer(new Probe(url, response.total));
+                return;
+            } catch (InterruptedException e) {
+                // 上层已收场：静默退出，不算节点的账，也不报失败（否则主循环白等一轮）。
+                return;
+            } catch (IOException e) {
+                failure = e;
+            } catch (RuntimeException e) {
+                failure = new IOException(String.valueOf(e));
+            }
+        } finally {
+            // 许可必须当场归还：探路只有 1 个字节，攥着许可就把并发槽变成了排队事故。
+            if (response != null) {
+                response.close();
+            }
+            if (acquired) {
+                gate.release();
+            }
+        }
+        if (failure == null) {
+            return;
+        }
+        if (!probeToken.cancelled()) {
+            if (status >= 400 && status < 500) {
+                resolver.failure(url, status);
+            } else if (status > 0 || !gotByte) {
+                // 只退避：慢/连不上/半途断的节点不该进封禁表，但也不该排在起播第一位。
+                resolver.failurePartial(url, gotByte ? 1L : 0L);
+            }
+        }
+        log("probe failed on " + RangeCore.hostOf(url) + ": " + failure);
+        done.offer(new ProbeFailure(failure, status));
+    }
+
+    /**
+     * 起播段的一次尝试：从 from 读到 stop，读到多少吐多少（一口最多 64 KiB，不等凑满 ——
+     * 播放器要的是尽早有字节，等凑满就是在压第一个字节）。第一次交付即发出响应头。
+     * 拿满了就把连接关掉交给窗口 —— 不再多要，避免播放器换连接时白花流量。
+     */
+    private Head headAttempt(CdnResolver resolver, Map<String, String> headers, long from, long stop,
+                             String url, long knownTotal, Sink sink, CancelToken token)
+            throws IOException, InterruptedException {
+        AccelConfig cfg = snap();
+        gate.acquire(230, token);
+        Transport.Response response = null;
+        long delivered = 0L;
+        long total = knownTotal;
+        int status = 0;
+        long startedAt = System.currentTimeMillis();
+        try {
+            response = transport.open(url, from, stop, headers,
+                    cfg.firstByteTimeoutMs, cfg.stallTimeoutMs);
+            status = response.status;
+            long allowedEnd = stop;
+            if (response.total > 0L && response.total - 1L < allowedEnd) {
+                allowedEnd = response.total - 1L;
+            }
+            if (status != 206 || response.rangeStart != from || response.rangeEnd != allowedEnd) {
+                throw new IOException("起播 Range 校验失败：HTTP " + status
+                        + " content-range=" + response.rangeStart + "-" + response.rangeEnd
+                        + " expect=" + from + "-" + allowedEnd);
+            }
+            if (response.total > 0L) {
+                total = response.total;
+            }
+            long want = allowedEnd - from + 1L;
+            byte[] buffer = new byte[(int) Math.min((long) HEAD_FLUSH_BYTES, want)];
+            InputStream in = response.body;
+            boolean playerGone = false;
+            while (delivered < want && !playerGone) {
+                if (token.cancelled()) {
+                    break;
+                }
+                int room = (int) Math.min((long) buffer.length, want - delivered);
+                int n = in.read(buffer, 0, room);
+                if (n < 0) {
+                    break;
+                }
+                try {
+                    sink.onChunk(buffer, n, new RangeCore.Piece(0, from + delivered,
+                            from + delivered + n - 1L), total);
+                } catch (IOException gone) {
+                    // 对 sink 写失败 = 播放器挂断：不算节点的账，已经吐出去的字节仍然算交付。
+                    token.cancel("sink closed");
+                    playerGone = true;
+                    break;
+                }
+                delivered += n;
+                if (System.currentTimeMillis() - startedAt > cfg.attemptTimeoutMs) {
+                    log("head attempt over budget on " + RangeCore.hostOf(url)
+                            + ": " + delivered + "/" + want);
+                    break;
+                }
+            }
+            if (delivered > 0L) {
+                resolver.success(url, bps(delivered, startedAt));
+            }
+            return new Head(delivered, total, url, null);
+        } catch (IOException e) {
+            if (token.cancelled()) {
+                // 播放器换清晰度/挂断：算交付，不算节点的账。
+                return new Head(delivered, total, url, null);
+            }
+            if (delivered > 0L) {
+                resolver.failurePartial(url, delivered);
+                return new Head(delivered, total, url, null);
+            }
+            resolver.failure(url, status);
+            throw e;
+        } finally {
+            if (response != null) {
+                response.close();
+            }
+            gate.release();
         }
     }
 

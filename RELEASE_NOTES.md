@@ -1,5 +1,32 @@
 # BiliTamer Release notes
 
+## v1.8.0
+
+* **首页推荐流清洗三项（移植自 MBGA）/ Three feed-cleanup switches ported from MBGA**:
+  只展示 UGC（`cardGoto≠av` 的官方合集/活动/直播整卡移除）、干净的视频卡片（去推荐理由
+  与竖屏角标，UP 入口沿用宿主自己的名字行）、禁止竖屏播放器（卡片路由 `bilibili://story/<id>`
+  改写为横屏播放页自己的最小路由 `bilibili://video/<id>`）；三项都会改变首页内容，出厂默认关。
+  / UGC-only feed, clean video cards and no-portrait-player switches, all off by default.
+* **6.6.0 的卡片载体已实机取证 / The 6.6.0 card carrier is now proven on device**:
+  推荐流列表元素是 gson 直解、协议名齐全的混淆类（每种 `card_type` 一个类），旧版
+  `BasicIndexItem`/`SmallCoverV2Item` 那套读写与点击链路口径都已失效；三项因此统一挂在
+  同一个协议解析出口、按 `@SerializedName` 定位与写回，实机 A/B 三项各自读数通过。
+  / Feed items are gson-built obfuscated classes, one per card type; all three switches act at
+  one parse exit via protocol names, verified with on-device A/B runs.
+* **两处失败模式做进了实现 / Two failure modes are designed in**: 只展示 UGC 带 fail-open
+  （整批都不匹配判据时不过滤并告警一次，附 cardGoto 直方图）；禁止竖屏播放器只保留 id、
+  丢掉卡片自带的预载参数段——带着它会让横屏播放页在启动时崩掉宿主（PITFALLS #40），
+  因此这一项只保留实测生效的数据层一路，6.4.0/6.5.0 那条 `BasicIndexItem.getUri` 兜底已撤
+  （拿不到实机读数、同形改写又会崩，等于把未知风险留在包里），老宿主上它会静默不生效。
+  / The UGC filter fails open with a one-shot histogram, and the player rewrite keeps only the
+  id because the card's own preload query crashes the landscape player (PITFALLS #40).
+* **多线程加速的两处实机问题 / Two on-device accel fixes**: 起播不再卡在 0 KB——首字节不再等
+  「一整块 256 KiB 先下完」，改成先用 1 个字节问出活着的节点、再在一条连接上边收边吐（每口
+  ≤64 KiB），并发 6–8 条播放流也不再互相抢光并发许可；拖回看过的区间不再重新加载——块清单
+  原先只在连接关闭时落盘，播放中途进程被杀就没有清单可读，现在每 8 MiB 落一次，实机重开同一条
+  视频的读数是 `disk=1207864 net=0`。 / The first byte no longer waits for a whole 256 KiB piece,
+  and the block index is flushed every 8 MiB instead of only when a connection closes.
+
 ## v1.7.14
 
 * **首页直播板块解锁 / Home live channel unlocked**: 国际版服务端按身份把顶栏「直播」那一格裁掉了，

@@ -4,6 +4,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
+import com.tamer.bili.hooks.FeedCleanHooks;
 import com.tamer.bili.hooks.FeedTagHooks;
 import com.tamer.bili.hooks.HomeNoAutoRefreshHooks;
 import com.tamer.bili.hooks.HomeUxHooks;
@@ -128,7 +129,10 @@ public class MainHook extends XposedModule implements HookApi {
                     + " accel_mode=" + getAccelMode()
                     + " accel_cache_mb=" + getAccelCacheMb() + ")"
                     + " probe_enabled=" + isProbeEnabled()
-                    + " feed_blocked_tnames=" + feedWordCount() + " word(s)");
+                    + " feed_blocked_tnames=" + feedWordCount() + " word(s)"
+                    + " feed_only_ugc=" + isFeedOnlyUgcEnabled()
+                    + " feed_clean_card=" + isFeedCleanCardEnabled()
+                    + " feed_no_portrait=" + isFeedNoPortraitEnabled());
         } catch (Throwable t) {
             warn("logConfig failed: " + t);
         }
@@ -226,6 +230,11 @@ public class MainHook extends XposedModule implements HookApi {
             install("FeedTagHooks", new ThrowingAction() {
                 @Override public void run() throws Throwable {
                     new FeedTagHooks(MainHook.this, cl).install();
+                }
+            });
+            install("FeedCleanHooks", new ThrowingAction() {
+                @Override public void run() throws Throwable {
+                    new FeedCleanHooks(MainHook.this, cl).install();
                 }
             });
             install("AccelHooks(main)", new ThrowingAction() {
@@ -664,6 +673,27 @@ public class MainHook extends XposedModule implements HookApi {
     public String getFeedBlockedTnames() {
         BiliConfig c = config;
         return c == null ? "" : c.getString(BiliConfig.KEY_FEED_BLOCK_TNAMES);
+    }
+
+    @Override
+    public boolean isFeedOnlyUgcEnabled() {
+        BiliConfig c = config;
+        return c != null && c.get(BiliConfig.KEY_FEED_ONLY_UGC,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_FEED_ONLY_UGC));
+    }
+
+    @Override
+    public boolean isFeedCleanCardEnabled() {
+        BiliConfig c = config;
+        return c != null && c.get(BiliConfig.KEY_FEED_CLEAN_CARD,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_FEED_CLEAN_CARD));
+    }
+
+    @Override
+    public boolean isFeedNoPortraitEnabled() {
+        BiliConfig c = config;
+        return c != null && c.get(BiliConfig.KEY_FEED_NO_PORTRAIT,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_FEED_NO_PORTRAIT));
     }
 
     // ===== 日志 =====

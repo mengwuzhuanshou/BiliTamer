@@ -594,6 +594,10 @@ public final class AccelHooksSelfTest {
         @Override public boolean isHideUpPrompt() { return false; }
         @Override public boolean isNoAutoRefreshEnabled() { return false; }
         @Override public boolean isLiveBgUnlockEnabled() { return false; }
+        @Override public boolean isLiveTabUnlockEnabled() { return false; }
+        @Override public boolean isFeedOnlyUgcEnabled() { return false; }
+        @Override public boolean isFeedCleanCardEnabled() { return false; }
+        @Override public boolean isFeedNoPortraitEnabled() { return false; }
         @Override public boolean isVerboseLoggingEnabled() { return false; }
         @Override public boolean isProbeEnabled() { return false; }
         @Override public String getFeedBlockedTnames() { return ""; }

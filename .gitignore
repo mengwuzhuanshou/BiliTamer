@@ -20,6 +20,7 @@ signing.local
 # session leftovers / diagnostics
 NOTES.md
 HANDOVER/
+.tmpdev/
 __pycache__/
 *.pyc
 tools/engine/__pycache__/

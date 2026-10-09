@@ -64,6 +64,11 @@ public final class AccelSelfTest {
         /** start ≥ 该值的请求额外挂起 slowMs：把「还在线路上的子块」变成可布置的事实，而不是赌时序。 */
         long slowFrom = -1L;
         long slowMs;
+        /**
+         * 每字节摊多少纳秒：模拟「带宽受限」，让正文真的陆续到达。
+         * 假 CDN 原本瞬间给完整块，量不出「第一个字节等了多大一口」这件事 —— 起播 0 KB 就是这么溜过去的。
+         */
+        long paceNsPerByte;
 
         FakeCdn(int size) {
             file = new byte[size];
@@ -142,7 +147,7 @@ public final class AccelSelfTest {
                 int n = (int) (file.length - from);
                 byte[] copy = new byte[n];
                 System.arraycopy(file, (int) from, copy, 0, n);
-                return new Transport.Response(200, -1, -1, file.length, new ByteArrayInputStream(copy), null);
+                return new Transport.Response(200, -1, -1, file.length, pacedBody(copy), null);
             }
             if (end < 0L) {
                 long from = Math.max(0L, Math.min(start, file.length));
@@ -151,7 +156,7 @@ public final class AccelSelfTest {
                 System.arraycopy(file, (int) from, copy, 0, n);
                 return new Transport.Response(206, from, file.length - 1,
                         mode == BEHAV_NO_TOTAL ? -1L : (long) file.length,
-                        new ByteArrayInputStream(copy), null);
+                        pacedBody(copy), null);
             }
             long last = Math.min(end, file.length - 1L);
             if (start >= file.length || last < start) {
@@ -162,7 +167,7 @@ public final class AccelSelfTest {
             System.arraycopy(file, (int) start, copy, 0, n);
             InputStream body = mode == BEHAV_DROP
                     ? new TrickleStream(copy, Math.max(1, n / 3))
-                    : new ByteArrayInputStream(copy);
+                    : pacedBody(copy);
             if (mode == BEHAV_NO_TOTAL) {
                 // 真实节点偶尔会写成 bytes s-e/*：区间对、总长未知。
                 return new Transport.Response(206, start, last, -1L, body, null);
@@ -170,8 +175,56 @@ public final class AccelSelfTest {
             return new Transport.Response(206, start, last, file.length, body, null);
         }
 
+        /** 设了 paceNsPerByte 就走「字节陆续到」的流，否则瞬间给完（其余用例不关心首字节时序）。 */
+        private InputStream pacedBody(byte[] copy) {
+            return paceNsPerByte > 0L ? new PacedStream(copy, paceNsPerByte) : new ByteArrayInputStream(copy);
+        }
+
         private static InputStream empty() {
             return new ByteArrayInputStream(new byte[0]);
+        }
+    }
+
+    /** 每 4 KiB 睡「4096×nsPerByte」纳秒：把带宽变成可布置的事实，首字节到底等了多大一口才算得出来。 */
+    private static final class PacedStream extends InputStream {
+
+        private final byte[] data;
+        private final long nsPerByte;
+        private int pos;
+
+        PacedStream(byte[] data, long nsPerByte) {
+            this.data = data;
+            this.nsPerByte = nsPerByte;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (pos >= data.length) {
+                return -1;
+            }
+            sleepFor(1);
+            return data[pos++] & 0xFF;
+        }
+
+        @Override
+        public int read(byte[] out, int off, int len) throws IOException {
+            if (pos >= data.length) {
+                return -1;
+            }
+            int n = Math.min(len, Math.min(4096, data.length - pos));
+            sleepFor(n);
+            System.arraycopy(data, pos, out, off, n);
+            pos += n;
+            return n;
+        }
+
+        private void sleepFor(int n) {
+            long nanos = nsPerByte * (long) n;
+            try {
+                Thread.sleep(nanos / 1000000L, (int) (nanos % 1000000L));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -969,6 +1022,130 @@ public final class AccelSelfTest {
         check(rec.bytes >= 2L * cfg.minChunkBytes, "确有交付：" + rec.bytes + " 字节");
         // 铺满窗口是 1 头 + 16 块 ≈ 17 次请求；跟着消费爬坡只用付头几块的账。
         check(hits <= 10, "浅消费者没有被垫付整窗：请求 " + hits + " 次（整窗是 17 次）");
+    }
+
+    /**
+     * 真机「开头 0 KB/s 卡一会」的判据。响应头是在第一次交付里发的，所以「第一个字节多久到手」
+     * 就等于「起播要凑多大一口」：旧写法要整块 256 KiB 装进内存才吐，而且八条对冲候选各下各的、
+     * 把并发闸门占满，于是每条流的首字节都排在别人的整块后面。
+     *
+     * <p>节点按带宽限速（{@code paceNsPerByte}）才量得出这件事：瞬间给完整块的假 CDN 下，
+     * 一口和一块都是 0 ms，这个 bug 就是从这里溜过去的。
+     */
+    private static void testStartupHeadFlushesIncrementally() throws InterruptedException {
+        section("起播段边收边吐：第一个字节只等一口，不排在别人的整块后面");
+
+        FakeCdn cdn = new FakeCdn(2 * 1024 * 1024);
+        cdn.paceNsPerByte = 2000L;          // ≈ 2 ms/KiB：一口 64 KiB 要 128 ms，整块 256 KiB 要 512 ms
+        AccelConfig cfg = testConfig();
+        cfg.concurrency = 2;                // 两条流两个位置：闸门排队要看得见
+        cfg.minChunkBytes = 256L * 1024L;   // 对齐真机默认，旧的「整块起播」就是这一口
+        cfg.maxChunkBytes = 256L * 1024L;
+        cfg.windowBytes = 512L * 1024L;
+        final PieceDownloader downloader = new PieceDownloader(cdn.transport(), cfg);
+        final FirstByteSink[] sinks = new FirstByteSink[2];
+        final long[] startedAt = new long[2];
+        final Thread[] threads = new Thread[2];
+        try {
+            for (int i = 0; i < 2; i++) {
+                final int index = i;
+                final CancelToken token = new CancelToken();
+                final CdnResolver resolver = resolverFor(url(HOSTS[index], "inc" + index), null,
+                        CdnResolver.MODE_MAINLAND, new CdnResolver.BanList(2));
+                sinks[index] = new FirstByteSink(token);
+                threads[index] = new Thread(new Runnable() {
+                    @Override public void run() {
+                        startedAt[index] = System.currentTimeMillis();
+                        try {
+                            downloader.stream(resolver, null, 0L, -1L, sinks[index], token);
+                        } catch (IOException ignored) {
+                            // 消费者自己收场，不算失败。
+                        }
+                    }
+                }, "startup-" + index);
+                threads[index].start();
+            }
+            for (int i = 0; i < 2; i++) {
+                threads[i].join(30000L);
+            }
+            for (int i = 0; i < 2; i++) {
+                FirstByteSink sink = sinks[i];
+                check(sink.firstAtMs > 0L, "第 " + (i + 1) + " 条流拿到了第一个字节");
+                check(sink.firstLength > 0 && sink.firstLength <= 64 * 1024,
+                        "第 " + (i + 1) + " 条流的第一口不超过 64 KiB：" + sink.firstLength + " 字节");
+                long waited = sink.firstAtMs - startedAt[i];
+                check(waited < 400L, "第 " + (i + 1) + " 条流的首字节只等一口：" + waited
+                        + " ms（整块起播要 " + (256L * 2L) + " ms）");
+                equal(Long.valueOf(sink.total), Long.valueOf(2L * 1024L * 1024L),
+                        "第 " + (i + 1) + " 条流起播就知道总长");
+                int head = totalHits(cdn);
+                // hits 按宿主记账、两条流的候选宿主是重叠的，所以这里只能看总数：两条流各两次。
+                check(head <= 4, "两条流的起播各只花两次请求（1 字节探路 + 一条边收边吐）：共 "
+                        + head + " 次");
+            }
+        } finally {
+            downloader.shutdown();
+        }
+    }
+
+    /** 清单只在连接结束时刷盘的话，进程被杀就把覆盖表留在内存里了：见 {@link #testIndexSurvivesWithoutClose}。 */
+    private static void testIndexSurvivesWithoutClose() throws Exception {
+        section("清单边写边刷：进程被杀也不丢已覆盖区间");
+
+        java.io.File dir = cacheDir("indexflush");
+        String one = url(HOSTS[0], "indexflush");
+        BlockCache writer = BlockCache.forUrl(dir, one);
+        check(writer != null, "拿到写侧句柄");
+        long total = 16L * 1024L * 1024L;
+        check(writer.openForWrite(total), "按总长建稀疏文件");
+        int per = 256 * 1024;
+        for (int i = 0; i < 40; i++) {      // 40 × 256 KiB = 10 MiB，跨过 8 MiB 这道刷盘线
+            long at = (long) i * per;
+            byte[] payload = bytes(at, per);
+            writer.put(at, payload, per);
+        }
+        // 另开一个句柄，等价于「:ijkservice 被杀之后重新打开」：不 close 写侧，也就没走关闭刷盘那条路。
+        BlockCache reopened = BlockCache.forUrl(dir, one);
+        check(reopened.loadExisting(), "没关闭也读得到清单");
+        long seen = reopened.coveredEndFrom(0L);
+        check(seen >= 8L * 1024L * 1024L - 1L, "重开后至少看得见 8 MiB 的覆盖：last=" + seen);
+        reopened.close();
+        writer.close();
+        // 关闭刷盘补上剩下的 2 MiB：说明上面那条判据不是靠关闭才成立的。
+        BlockCache afterClose = BlockCache.forUrl(dir, one);
+        check(afterClose.loadExisting(), "关闭后清单仍读得到");
+        equal(Long.valueOf(afterClose.coveredEndFrom(0L)), Long.valueOf(10L * 1024L * 1024L - 1L),
+                "关闭时补齐到 10 MiB");
+        afterClose.close();
+    }
+
+    /** 只认第一个字节的消费者：记下它多久到手、多大一口，然后立刻收场。 */
+    private static final class FirstByteSink implements PieceDownloader.Sink {
+
+        private final CancelToken token;
+        volatile long firstAtMs;
+        volatile int firstLength;
+        volatile long total = -1L;
+
+        FirstByteSink(CancelToken token) {
+            this.token = token;
+        }
+
+        @Override
+        public void onChunk(byte[] data, int length, RangeCore.Piece piece, long total) {
+            if (firstAtMs != 0L) {
+                return;
+            }
+            firstAtMs = System.currentTimeMillis();
+            firstLength = length;
+            this.total = total;
+            token.cancel("自测：只要第一个字节");
+        }
+
+        @Override
+        public void onBuffered(byte[] data, int length, RangeCore.Piece piece, long total) {
+            // 不关心：这条流在第一个字节就收了。
+        }
     }
 
     private static void testTotalFailure(FakeCdn cdn) {
@@ -1813,10 +1990,12 @@ public final class AccelSelfTest {
         testAbandonedWindow(cdn, file);
         testAbandonExitsPromptly();
         testShallowConsumerStaysShallow();
+        testStartupHeadFlushesIncrementally();
         testTotalFailure(cdn);
         testProxy();
         testProxyChunked();
         testBlockCache();
+        testIndexSurvivesWithoutClose();
         testSharedHandles();
         testConcurrentStreamsReadDisk();
         testDisconnectDuringCacheServe();

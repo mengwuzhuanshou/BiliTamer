@@ -124,4 +124,13 @@ public interface HookApi {
 
     /** 首页推荐分区屏蔽词表（逗号分隔原串；未配置返回空串）。 */
     String getFeedBlockedTnames();
+
+    /** 首页只展示 UGC：移除 cardGoto 非「av」的推荐卡（默认关）。 */
+    boolean isFeedOnlyUgcEnabled();
+
+    /** 干净的视频卡片：清推荐理由/竖屏角标，缺 descButton 时补 UP 名入口（默认关）。 */
+    boolean isFeedCleanCardEnabled();
+
+    /** 禁止竖屏播放：卡片路由 bilibili://story/ 改写为 bilibili://video/（默认关）。 */
+    boolean isFeedNoPortraitEnabled();
 }

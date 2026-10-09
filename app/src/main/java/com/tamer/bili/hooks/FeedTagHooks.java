@@ -24,8 +24,12 @@ import io.github.libxposed.api.XposedInterface;
  *
  * 词表：conf 键 feed_blocked_tnames（逗号分隔，设置页支持逗号/换行批量输入）。
  * 匹配语义 = tname 包含词（含「主机游戏」类长标签被「游戏」命中）；词表为空=功能关。
- * 字段定位用 @SerializedName 注解反射（协议名抗混淆漂移）；ArgsData.tname 无注解
- * 但字段名与 JSON 同名，直接按字段名兜底。
+ * 字段定位用 @SerializedName 注解反射（协议名抗混淆漂移），同名字段只作兜底。
+ * 6.6.0（9130300）实证这个**顺序不能颠倒**：args 模型被 R8 改成 {@code LbE0/a;}
+ * （toString 自证仍是 {@code ArgsData(aid=…, tname=…)}），字段名全成单字母
+ * {@code a}..{@code p}，但 {@code @SerializedName("tname")} 原样保留——本功能命中的
+ * 是注解那一路，字段名兜底在这一代必然落空。反过来若先按字段名找，功能会静默变成
+ * 空操作而日志毫无异样（PITFALLS #39 补录）。
  *
  * 渐进式 chunk（PegasusResponseTypeAdapter 每 5 条回调）未经此口，若实测有漏卡
  * 再补 ME0.e.a BEFORE 挂点。

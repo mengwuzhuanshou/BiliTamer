@@ -151,6 +151,23 @@ public class SettingsActivity extends Activity {
                 + "改后需强停 B 站重开 / appended at the shared funnel that feeds both the titles "
                 + "and the pager pages, so existing tab indices stay untouched");
 
+        section("首页推荐流清洗", "Feed stream cleanup");
+        addSwitch(BiliConfig.KEY_FEED_ONLY_UGC, "首页只展示用户上传作品（UGC）", "Show only UGC on home",
+                "移除推荐流里的官方合集、活动、直播等非用户上传卡（判据 cardGoto=av）。\n"
+                + "安全阀：若一整批卡都不匹配该判据（宿主改了口径），本批不过滤并在日志告警，\n"
+                + "不会把首页清空。三项都只影响之后发出的流请求：屏幕上已经渲染好的卡片，\n"
+                + "要下拉刷新/切页/重进首页才会变。改后需强停 B 站重开");
+        addSwitch(BiliConfig.KEY_FEED_CLEAN_CARD, "干净的视频卡片", "Clean video cards",
+                "卡片只留标题与 UP：去掉「推荐理由」角标和「竖屏」角标。\n"
+                + "角标这些字段在 6.6.0 已被混淆成单字母，所以按服务端协议名定位、\n"
+                + "不认 Java 字段名，宿主改名不会让功能静默失效；UP 入口沿用宿主自己的\n"
+                + "名字行（实测点它本来就能进空间页），不再另补按钮。改后需强停 B 站重开");
+        addSwitch(BiliConfig.KEY_FEED_NO_PORTRAIT, "禁止竖屏播放器", "No portrait player",
+                "首页点竖屏视频时改用传统横屏播放器，不再进竖屏全屏（单击暂停）的新播放器。\n"
+                + "只影响卡片跳转路由（story→video），播放页内的竖屏入口不变。改写只保留视频 id、\n"
+                + "丢掉卡片自带的预载参数（实测带着它会让横屏播放页启动即崩），代价是这类卡起播\n"
+                + "不走那条预载、多 P 稿件从第一 P 解析。改后需强停 B 站重开");
+
         section("首页推荐分区屏蔽", "Feed partition blocker");
         LinearLayout tagRow = new LinearLayout(this);
         tagRow.setOrientation(LinearLayout.HORIZONTAL);

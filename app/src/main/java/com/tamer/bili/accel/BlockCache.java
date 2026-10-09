@@ -27,6 +27,9 @@ public final class BlockCache {
         BlockCache forUrl(String originalUrl);
     }
 
+    /** 每落盘这么多字节就把清单刷出去一次：连接关闭才刷的话，进程被杀等于全丢。 */
+    private static final long INDEX_FLUSH_BYTES = 8L * 1024L * 1024L;
+
     /** 已覆盖区间的有序不重叠集合。 */
     static final class Covered {
         private final List<long[]> spans = new ArrayList<long[]>();
@@ -88,6 +91,20 @@ public final class BlockCache {
             return -1L;
         }
 
+        /** 账面用：已覆盖的字节总数与最后覆盖到的字节。 */
+        synchronized long[] coverage() {
+            long bytes = 0L;
+            long last = -1L;
+            for (int i = 0; i < spans.size(); i++) {
+                long[] span = spans.get(i);
+                bytes += span[1] - span[0] + 1L;
+                if (span[1] > last) {
+                    last = span[1];
+                }
+            }
+            return new long[]{spans.size(), bytes, last};
+        }
+
         synchronized List<long[]> snapshot() {
             List<long[]> out = new ArrayList<long[]>();
             for (int i = 0; i < spans.size(); i++) {
@@ -147,6 +164,8 @@ public final class BlockCache {
     private long total = -1L;
     private boolean usable;
     private boolean dirtyIndex;
+    /** 距上次刷清单又落盘了多少字节；够一坨就提前刷，见 {@link #put}。 */
+    private long dirtyBytes;
     private PieceDownloader.Logger logger;
 
     private BlockCache(File dataFile, File indexFile) {
@@ -347,6 +366,14 @@ public final class BlockCache {
             data.write(payload, 0, length);
             covered.add(start, start + length - 1);
             dirtyIndex = true;
+            dirtyBytes += length;
+            if (dirtyBytes >= INDEX_FLUSH_BYTES) {
+                // 刷清单不必等连接关闭：B 站的 :ijkservice 常被直接杀掉，
+                // 只在 close() 刷盘会让整份已下内容在下次打开时完全看不见
+                // （真机缓存目录里就有 4 个只有 .bin、没有 .idx 的文件）。
+                dirtyBytes = 0L;
+                flushIndex();
+            }
         } catch (IOException e) {
             // 写坏（磁盘满等）之后不再尝试：这条流退化成纯下载。
             usable = false;
@@ -383,10 +410,24 @@ public final class BlockCache {
                 temp.delete();
             }
             dirtyIndex = false;
+            dirtyBytes = 0L;
         } catch (IOException e) {
             temp.delete();
             log("block cache index flush failed: " + e);
         }
+    }
+
+    /**
+     * 账面用的一行：这份缓存此刻认得哪些字节。
+     * 判断「seek 回看过的区间为什么还要走网」只需要它 + 那条 req= 行，不用另插探针：
+     * idx=missing 说明清单没落盘（进程被杀）、spans=0 说明这段本来就没下过、
+     * 三个数都正常却仍走网那就是请求起点落在了洞上。
+     */
+    public synchronized String coverageBrief() {
+        long[] c = covered.coverage();
+        return "spans=" + c[0] + " covered=" + (c[1] / 1024L) + "KiB last=" + c[2]
+                + " total=" + total + " usable=" + (usable ? "y" : "n")
+                + " idx=" + (indexFile.isFile() ? "ok" : "missing");
     }
 
     /**

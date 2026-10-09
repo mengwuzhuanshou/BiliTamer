@@ -35,6 +35,9 @@ An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`,
 | 首页直播板块 Live channel unlock | 国际版顶栏默认没有「直播」栏：服务端按身份裁剪下发的 tab 列表。解锁即把 `bilibili://live/home` 追加进顶栏页列表（标题与 pager 同源，不动其它 tab）/ The server trims the live channel out of the tab list for intl identities; this appends it back into the top-bar page list (titles and pager share one list) | 开 on |
 | 底栏删 tab Bottom-bar tabs | 移除「消息」tab、隐藏「我的」tab / Remove Message tab, hide Mine tab | 开 on（6.4.0） |
 | 首页推荐分区屏蔽 Feed partition blocker | 按推荐卡分区标签（tname）整卡屏蔽；词表批量输入/检索/逐词移除，无上限 / Block feed cards by partition tag; bulk-edit/search/remove word list, no limit | 空词表不生效 |
+| 首页只展示 UGC UGC-only feed | 移除官方合集/活动/直播等非用户上传卡（判据 `cardGoto=av`）；整批都不匹配时不过滤并告警，不会清空首页 / Drop non-UGC feed cards; a batch with no match is left untouched instead of blanking the feed | 关 off |
+| 干净的视频卡片 Clean video cards | 去掉卡片上的「竖屏」「1万点赞」这类角标文字与推荐理由，UP 入口沿用宿主自己的名字行（实测点它本来就进空间页）；锚点按服务端协议名定位，宿主改名不至于静默失效 / Strip the "portrait" and "10k likes" style badges and recommendation reasons from feed cards; the UP entry stays the host's own name line, which already opens the author space. Anchors resolve by protocol name so a host rename can't fail silently | 关 off |
+| 禁止竖屏播放器 No portrait player | 首页竖屏卡的跳转路由 `bilibili://story/<id>` 改写为 `bilibili://video/<id>`，落进传统横屏播放器；只保留 id、丢掉卡片自带的预载参数段（带着它会让横屏播放页在启动时崩，见 PITFALLS #40）/ Rewrite story routes on feed cards to the landscape player's own minimal route (id only — the card's preload query is dropped, because keeping it crashes the target page; see PITFALLS #40) | 关 off |
 | 配置同步 Config sync | 设置保存经启动投递+host-conf 代次协议生效，不依赖 root / Settings delivered at launch with a host-conf generation protocol — no root needed | — |
 
 所有开关独立可逆；总开关关闭后模块完全休眠。
@@ -152,6 +155,23 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
   默认的评论区限定模式无此副作用 / The international comment area currently has no ads;
   banner ads only appear when the legacy global identity declaration is used — the default
   scoped mode has no such side effect;
+* 首页三项（只展示 UGC／干净卡片／禁止竖屏）挂在推荐流的协议解析出口上：只影响**之后
+  发出的流请求**，屏幕上已经渲染好的那批卡要等下拉刷新/切页/重进首页才会被改写 /
+  The three home-feed switches act at the protocol parse exit, so they only affect
+  subsequent feed requests — cards already rendered change after a pull-to-refresh,
+  a tab switch or a relaunch;
+* 「禁止竖屏播放器」丢掉卡片自带的预载参数段（这是不崩的前提），因此竖屏卡在横屏播放页
+  起播时不走那条预载、分 P 固定从第一 P 解析 / Dropping the preload query (required to keep
+  the target page from crashing) means those videos start without that preload hint and
+  resolve from part 1;
+* 「禁止竖屏播放器」实测只在 6.6.0 上验证过生效：它改的是卡片自己的 `uri` 协议字段，
+  宿主换代到不流经该解析出口的那代卡片模型时，这一项会**静默不生效**（日志会给
+  parse-entry not found 告警）。先前为 6.4.0/6.5.0 配过一条 `BasicIndexItem.getUri` 兜底，
+  因无法在不降级宿主的前提下取到实机读数、且同形的「保留 query」改写在 6.6.0 已证明会把
+  播放页点崩，已整条撤掉 / The no-portrait rewrite is verified on 6.6.0 only; on hosts whose
+  cards don't carry a `uri` protocol field it stays inert (the parse-entry warning says so).
+  The former 6.4.0/6.5.0 fallback hook on `BasicIndexItem.getUri` was removed: unverifiable
+  without downgrading the host, and the same shape of rewrite crashed the player page;
 * IP 属地依赖服务端策略，属风控敏感功能，是否显示由服务端决定 / the IP-location display is
   server-controlled and risk-control sensitive;
 * 主页 IP 标签依赖账号与服务端返回，个别页面可能无该字段 / the profile IP tag depends on the server response.
@@ -162,6 +182,7 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
 | --- | --- | --- |
 | **BiliFix** (com.xjw.bilifix.in) | 身份声明思路与 libxposed 打包范式的启蒙参考（本模块与其无代码派生关系）/ the inspiration for the identity-declaration approach and libxposed packaging (no code derived from it) | https://github.com/xiaojiuwo233/BiliFix |
 | **libxposed/api** | 现代 Xposed API / the modern Xposed API | https://github.com/libxposed/api |
+| **MBGA** (top.trangle.mbga) | 首页三项功能（只展示 UGC／干净卡片／禁止竖屏）的语义来源：本版按 6.6.0 的新接缝与新城载体重写，未复用其代码 / the origin of the three home-feed features' semantics — reimplemented against this host's own seams and card models, no code reused | https://github.com/cledwynl/mbga |
 | **AOSP dx / apksig** | 构建链组件（Apache-2.0）/ build-chain components | https://android.googlesource.com |
 
 ## 许可证 / License

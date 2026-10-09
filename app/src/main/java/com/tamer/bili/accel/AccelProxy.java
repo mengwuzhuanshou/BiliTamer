@@ -272,9 +272,12 @@ public final class AccelProxy implements Closeable {
         // 一次请求一行账面：盘上吐了多少 / 网上吐了多少。/proc/net/dev 的 lo 和 du 都会骗人
         // （前者混着别人的回环，后者延迟落块），只有这里能直接判定缓存到底命中没有。
         // 盘上的数不能超过总出口：sink 会在 Content-Length 处截断，写失败的那一块也算在 out 里。
+        // 后面挂上缓存此刻认得哪些字节：seek 回看过的区间还走网时，这一行就能分清是
+        // 清单没落盘（idx=missing）、那段本来没下过（spans=0/covered 小），还是起点落在洞上。
         long diskBytes = Math.min(disk[0], sink.written);
         engine.log("req=" + start + "-" + end + " out=" + sink.written + " disk=" + diskBytes
-                + " net=" + (sink.written - diskBytes) + " key=" + RangeCore.fileKeyOf(original));
+                + " net=" + (sink.written - diskBytes) + " key=" + RangeCore.fileKeyOf(original)
+                + " cache[" + (cache == null ? "off" : cache.coverageBrief()) + "]");
         if (sink.started() && !sink.chunked && sink.written != sink.limit) {
             engine.log("stream short: written=" + sink.written + " promised=" + sink.limit
                     + " req=" + start + "-" + end);
