@@ -76,9 +76,16 @@ final class ConfSync {
     /**
      * 统一保存：SP → 本地副本 → root 兜底（尽力而为，失败不影响主链路）。
      * 返回本次代次（>0 = 保存成功，可发起启动投递）。
+     *
+     * 代次取「当前时刻」与「已有最大代次 + 1」的较大者，而不是直接用
+     * {@code System.currentTimeMillis()}：投递侧的判据是
+     * {@code incoming.overrideGen <= current} 就丢弃（陈旧副本盖不过新配置），所以
+     * 系统时钟一旦回拨（换机、恢复备份、手动改时间、NTP 校正都可能），此后所有保存都会
+     * 被当成陈旧件**永久**丢掉，界面每次都显示「已保存」而配置再也不进宿主。单调化把
+     * 这个失效面从「永久」降为「不受时钟影响」。
      */
     static long saveAll(Context c) {
-        long gen = System.currentTimeMillis();
+        long gen = Math.max(System.currentTimeMillis(), previousGen(c) + 1);
         byte[] data = kvConfText(collectKv(c), gen).getBytes();
         writeConf(new java.io.File(c.getFilesDir(), BiliConfig.CONF_NAME), data);
         try {
@@ -92,6 +99,40 @@ final class ConfSync {
         sLastGen = gen;
         rootSyncFallback(c, data); // 开发兜底；分发版无 root 时静默失败，无害
         return gen;
+    }
+
+    /** 已知最大代次：内存里上次保存的值，和两份本地副本里各自的 conf_gen，三者取最大。 */
+    private static long previousGen(Context c) {
+        long best = sLastGen;
+        best = Math.max(best, readGen(new java.io.File(c.getFilesDir(), BiliConfig.CONF_NAME)));
+        best = Math.max(best, readGen(new java.io.File(
+                new java.io.File(c.getFilesDir().getParentFile(), "shared_prefs"),
+                BiliConfig.CONF_NAME)));
+        return best;
+    }
+
+    /** 读一个 conf 副本里的 {@code conf_gen}；读不到（文件不存在/无该行）返回 0。 */
+    private static long readGen(java.io.File f) {
+        try {
+            if (!f.isFile()) {
+                return 0;
+            }
+            byte[] buf = new byte[(int) Math.min(f.length(), 65536)];
+            java.io.FileInputStream fis = new java.io.FileInputStream(f);
+            int n = fis.read(buf);
+            fis.close();
+            if (n <= 0) {
+                return 0;
+            }
+            String prefix = BiliConfig.KEY_CONF_GEN + "=";
+            for (String line : new String(buf, 0, n).split("\n")) {
+                if (line.startsWith(prefix)) {
+                    return Long.parseLong(line.substring(prefix.length()).trim());
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return 0;
     }
 
     /** root 同步（仅开发兜底，需 KSU 对模块 app 授权；失败静默）。 */
@@ -122,8 +163,13 @@ final class ConfSync {
      * 跨应用组件启动不被 OEM 拦截（本机实测 Provider/URI 授权/FUSE 全被封，
      * 唯组件启动幸存）。宿主运行中 onNewIntent 即时生效，未运行则拉起后由
      * Hook 落盘宿主自有副本。
+     *
+     * @return {@code null} = 带配置的 Intent 已发出；非 null = 失败原因。
+     *         这一步静默失败过：它整段 {@code catch (Throwable ignored)}，而设置页在
+     *         调用**之前**就显示「已保存」，于是 ROM 拦下拉起时用户看到的是「设置不生效」
+     *         而不是「没投递」。返回值就是为了让这一环在界面上可见。
      */
-    static void launchTargetWithConf(android.app.Activity act) {
+    static String launchTargetWithConf(android.app.Activity act) {
         try {
             String conf = sLastConf;
             long gen = sLastGen;
@@ -132,7 +178,7 @@ final class ConfSync {
                 conf = sLastConf;
             }
             if (conf == null || gen <= 0) {
-                return;
+                return "本地 conf 副本没写出来（保存这一步就失败了）";
             }
             android.content.Intent li = null;
             // 显式 ComponentName 启动：不经 PM 查询，绕开 Android 11+ 包可见性
@@ -149,7 +195,7 @@ final class ConfSync {
                         .getLaunchIntentForPackage(BiliConfig.TARGET_PKG);
             }
             if (li == null) {
-                return;
+                return "找不到 B 站的启动入口（包没装，或被系统隐藏）";
             }
             li.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
                     | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -157,7 +203,9 @@ final class ConfSync {
             li.putExtra("bili_conf", conf);
             li.putExtra("bili_gen", gen);
             act.startActivity(li);
-        } catch (Throwable ignored) {
+            return null;
+        } catch (Throwable t) {
+            return t.getClass().getSimpleName() + ": " + t.getMessage();
         }
     }
 }

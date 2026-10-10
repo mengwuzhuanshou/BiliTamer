@@ -28,7 +28,12 @@ import io.github.libxposed.api.XposedInterface;
  *  ② 干净的视频卡片（{@code feed_clean_card}）：按协议名清掉卡片角标——
  *     {@code rcmd_reason_style}/{@code left_bottom_rcmd_reason_style}（推荐理由，
  *     如「1万点赞」）与 {@code goto_icon}（类型就叫 {@code StoryCardIcon}，即用户名旁边
- *     的「竖屏」标）。
+ *     的「竖屏」标）。**两类键的清法不一样，这是实机踩出来的**：图标键整对象置 null
+ *     （宿主按对象有无决定那个图标 ViewStub 渲不渲染），理由键只能保留对象、清掉里面的
+ *     {@code text} 与颜色/图标字段——把它们也整对象置 null 会让宿主连「推荐理由 + UP 名」
+ *     那一整行都不渲染，标题下面变成一条空白（{@link #REASON_KEYS} 里记了 A/B 数）。
+ *     把这条空白判成「数据层收不掉、得去钩渲染层」是我的计数口径错了：空容器在功能关闭轮更多，
+ *     而当时屏幕渲染的是缓存批、日志打的是网络批，两批卡根本不相交（PITFALLS #48）。
  *     MBGA 还有半边「{@code desc_button} 为空时造一个 UP 名按钮」，这里**没有搬**，
  *     因为它在这代宿主是死写：数据类确实带 {@code desc_button} 字段（{@code XD0.u}
  *     的 {@code getDescButton()} 存在，写回也成功、日志一度打 {@code filled=4}），
@@ -338,13 +343,60 @@ public final class FeedCleanHooks {
      * **{@code desc} 不在清理之列**，这是现场推翻掉的一个想当然：它的值就是 real_desc 那行
      * 的名字（直播卡 {@code desc="小莫寝不足"} = 主播名），清了是删名字不是删角标。
      */
-    private static final String[] BADGE_KEYS = {
-            "rcmd_reason_style", "left_bottom_rcmd_reason_style", "goto_icon",
-            "story_card_icon",
+    /**
+     * 图标键：宿主按**对象有无**决定那个「竖屏」图标 ViewStub 渲不渲染
+     * （{@code ME0/x#onBind} 与 {@code kE0/e#j} 都是 {@code if (storyCardIcon == null)
+     * viewStub.setVisibility(GONE)}），所以整对象置 null 正是想要的。
+     */
+    private static final String[] BADGE_KEYS = {"goto_icon", "story_card_icon"};
+
+    /**
+     * 推荐理由键：**不能整对象置 null**。现场 A/B 实测（同一台设备、同一入口、只翻这个开关）：
+     * 四个键全置 null 时 39 张卡里 8 张的 {@code bottom_layout} 子节点数直接变成 0——
+     * 也就是「推荐理由 + UP 名」这一整行不渲染了，用户看到的就是标题下面一条空白；
+     * 关掉这一条只留图标键时 36 张卡 0 空白。宿主是用这个对象决定那一整行（含 UP 名）
+     * 渲不渲染的，所以只能**保留对象、清掉它的内容字段**。
+     */
+    private static final String[] REASON_KEYS = {
+            "rcmd_reason_style", "left_bottom_rcmd_reason_style",
     };
+
+    /**
+     * 推荐理由对象里要清的内容字段（{@code bE0.j} 的 {@code @SerializedName}，jadx 直读）。
+     * 不含 {@code text_len}/{@code bg_style} 这类 int 字段——反射给 int 写 null 必然失败，
+     * 而颜色与图标 URL 清空后它们已经没有可画的东西。
+     */
+    private static final String[] REASON_CONTENT_KEYS = {
+            "icon_url", "icon_night_url", "icon_bg_url",
+            "bg_color", "bg_color_night", "border_color", "border_color_night",
+    };
+
+    /** 一次性探针要看的键集（图标 + 理由，与清理口径无关）。 */
+    private static final String[] PROBE_KEYS = {
+            "rcmd_reason_style", "left_bottom_rcmd_reason_style", "goto_icon", "story_card_icon",
+    };
+
+    /**
+     * 这张卡有没有 UP 名要显示。6.6.0 的名字在 {@code args.up_name}（不在 {@code up} 里，
+     * 见 {@link #probeBatch}）。形状读不到时按「有名」处理：宁可留一条清空后的行，
+     * 也不要误把有名字的行收掉。
+     */
+    private boolean hasUpName(Object card) {
+        Object args = FeedItems.readJson(card, "args");
+        if (args == null) {
+            return true;
+        }
+        Object up = FeedItems.readProp(args, "upName");
+        if (up == null) {
+            return true;
+        }
+        return !(up instanceof String) || ((String) up).length() > 0;
+    }
 
     private void applyCleanCard(List<?> items) {
         int stripped = 0;
+        int rowKept = 0;
+        int rowDropped = 0;
         for (int i = 0; i < items.size(); i++) {
             Object item = items.get(i);
             if (item == null) {
@@ -355,6 +407,28 @@ public final class FeedCleanHooks {
             for (String key : BADGE_KEYS) {
                 if (FeedItems.readJson(card, key) != null) {
                     touched |= FeedItems.writeJson(card, key, null);
+                }
+            }
+            for (String key : REASON_KEYS) {
+                Object tag = FeedItems.readJson(card, key);
+                if (tag == null) {
+                    continue;
+                }
+                if (hasUpName(card)) {
+                    // 这行有 UP 名要留：保留对象、只清内容，否则宿主整行不渲染（见 #REASON_KEYS）
+                    if (FeedItems.writeJson(tag, "text", "")) {
+                        for (String paint : REASON_CONTENT_KEYS) {
+                            FeedItems.writeJson(tag, paint, null);
+                        }
+                        touched = true;
+                        rowKept++;
+                    }
+                } else {
+                    // 这行除了标签没别的内容：整对象置 null 让宿主把行收掉，别留一条空白
+                    if (FeedItems.writeJson(card, key, null)) {
+                        touched = true;
+                        rowDropped++;
+                    }
                 }
             }
             if (touched) {
@@ -371,7 +445,8 @@ public final class FeedCleanHooks {
         }
         if (cleanLogged.compareAndSet(false, true)) {
             api.info("feedclean: clean-card applied, badge cleared on " + stripped
-                    + " card(s) (batch " + items.size() + ")");
+                    + " card(s) (batch " + items.size() + "); reason row kept with name=" + rowKept
+                    + ", row dropped for no up_name=" + rowDropped);
         }
     }
 
@@ -401,7 +476,7 @@ public final class FeedCleanHooks {
                 // 每种卡型各打一份键表：现场证明不同 card_type 用的是不同的数据类
                 lastCls = cls;
                 StringBuilder present = new StringBuilder();
-                for (String key : BADGE_KEYS) {
+                for (String key : PROBE_KEYS) {
                     if (FeedItems.hasJson(card, key)) {
                         if (present.length() > 0) {
                             present.append('+');
@@ -416,12 +491,26 @@ public final class FeedCleanHooks {
             api.info("feedclean: card[" + i + "] cls=" + cls
                     + " type=" + FeedItems.readProp(card, "cardType")
                     + " goto=" + cardGotoOf(item)
+                    + " title=" + brief(FeedItems.readProp(card, "title"))
                     + " argsUp=" + FeedItems.readProp(args, "upName")
                     + "/" + FeedItems.readProp(args, "upId")
                     + " name(desc)=" + FeedItems.readJson(card, "desc")
-                    + " uri=" + FeedItems.readJson(card, "uri")
+                    + " uri=" + brief(FeedItems.readJson(card, "uri"))
                     + " badges" + badgeValues(card));
         }
+    }
+
+    /**
+     * 探针值截短：卡片 {@code uri} 里带着整条 playurl 预载（实测单值数千字节），日志行有长度
+     * 上限，超了就把行尾**截掉**——截掉的正是排在后面的 {@code badges} 段，等于探针白跑一轮。
+     * {@code title} 用同一个函数截，因为它要和界面 dump 对得上，全文也没人读。
+     */
+    private static String brief(Object v) {
+        if (v == null) {
+            return "null";
+        }
+        String s = String.valueOf(v);
+        return s.length() <= 48 ? s : s.substring(0, 48) + "...(" + s.length() + ")";
     }
 
     /**
@@ -434,18 +523,19 @@ public final class FeedCleanHooks {
      */
     private String badgeValues(Object card) {
         StringBuilder sb = new StringBuilder("{");
-        for (int i = 0; i < BADGE_KEYS.length; i++) {
+        for (int i = 0; i < PROBE_KEYS.length; i++) {
             if (i > 0) {
                 sb.append(' ');
             }
-            Object v = FeedItems.readJson(card, BADGE_KEYS[i]);
-            sb.append(BADGE_KEYS[i]).append('=');
+            Object v = FeedItems.readJson(card, PROBE_KEYS[i]);
+            sb.append(PROBE_KEYS[i]).append('=');
             if (v == null) {
                 sb.append('-');
             } else if (v instanceof String) {
                 sb.append('"').append(v).append('"');
             } else {
-                sb.append("obj(").append(v.getClass().getSimpleName()).append(')');
+                sb.append("obj(").append(v.getClass().getSimpleName())
+                        .append(":text=").append(FeedItems.readJson(v, "text")).append(')');
             }
         }
         return sb.append('}').toString();

@@ -383,24 +383,37 @@ public class SettingsActivity extends Activity {
     private void persistAll(boolean auto) {
         long gen = ConfSync.saveAll(this);
         String st;
+        String deliveryError = null;
         if (gen > 0) {
             // 无 root 主链路：仅用户手动改动（auto=false）才拉起 B 站投递配置；
             // auto（打开设置页/兜底补推）只落盘，避免打开设置页就切走前台。
             if (!auto) {
-                ConfSync.launchTargetWithConf(this);
+                deliveryError = ConfSync.launchTargetWithConf(this);
             }
-            st = "状态：✅ 已保存（gen=" + gen + "）"
-                    + (auto ? "" : "，正在拉起 B 站同步配置")
-                    + "\nconf 探针见 B 站启动日志首行 confSrc=";
+            if (auto) {
+                st = "状态：✅ 已保存（gen=" + gen + "）\nconf 探针见 B 站启动日志首行 confSrc=";
+            } else if (deliveryError == null) {
+                st = "状态：✅ 已保存（gen=" + gen + "），正在拉起 B 站同步配置"
+                        + "\nconf 探针见 B 站启动日志首行 confSrc=";
+            } else {
+                // 投递失败必须看得见：本地已存但不拉起，宿主那边用的还是旧配置，
+                // 用户会读成「开关坏了」。这里给一条不依赖我们拉起的手动重挂路径。
+                st = "状态：⚠️ 已保存（gen=" + gen + "），但没能拉起 B 站投递配置\n"
+                        + "原因：" + deliveryError
+                        + "\n请手动彻底退出 B 站（从最近任务划掉）再打开一次，配置会在那时生效。";
+            }
         } else {
             st = "状态：❌ 保存失败\nconf 探针见 B 站启动日志首行 confSrc=";
         }
         statusView.setText(st.toString());
-        android.util.Log.i("BiliTamer", "persistAll: gen=" + gen + " auto=" + auto);
+        android.util.Log.i("BiliTamer", "persistAll: gen=" + gen + " auto=" + auto
+                + (deliveryError == null ? "" : " deliveryError=" + deliveryError));
         if (!auto) {
             Toast.makeText(SettingsActivity.this,
-                    gen > 0 ? "已保存，正在拉起 B 站同步配置" : "保存失败",
-                    Toast.LENGTH_SHORT).show();
+                    gen <= 0 ? "保存失败"
+                            : (deliveryError == null ? "已保存，正在拉起 B 站同步配置"
+                                    : "已保存，但投递失败，请手动重启 B 站"),
+                    Toast.LENGTH_LONG).show();
         }
     }
 }

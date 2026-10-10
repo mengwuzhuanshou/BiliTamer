@@ -172,7 +172,12 @@ public class FeedTagSettingsActivity extends Activity {
                 .putString(BiliConfig.KEY_FEED_BLOCK_TNAMES, sb.toString()).apply();
         long gen = ConfSync.saveAll(this);
         if (gen > 0) {
-            ConfSync.launchTargetWithConf(this); // 无 root 主链路：带配置拉起 B 站
+            String deliveryError = ConfSync.launchTargetWithConf(this); // 无 root 主链路：带配置拉起 B 站
+            if (deliveryError != null) {
+                // 拉起失败≠保存失败：本地已存，但宿主还拿不到新值，界面必须区分这两件事。
+                Toast.makeText(this, "已保存，但投递失败（" + deliveryError
+                        + "），请手动彻底退出 B 站再打开一次", Toast.LENGTH_LONG).show();
+            }
         } else {
             Toast.makeText(this, "⚠ 保存失败", Toast.LENGTH_LONG).show();
         }

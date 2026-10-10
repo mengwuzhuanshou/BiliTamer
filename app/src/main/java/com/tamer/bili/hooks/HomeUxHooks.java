@@ -26,11 +26,8 @@ import android.widget.TextView;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -125,18 +122,14 @@ public final class HomeUxHooks {
     // 常量只作快路径，找不到时按名字解析（见 tapBottomTab）。
     private static final int TAB_HOST_VIEW_ID = 0x7f0938d3;
 
-    // ===== Compose content 探针（Pegasus 底栏专项 RE）=====
-    /** 已探测过 setContent 的 loader（主 loader + main2 插件 loader 各试一次）。 */
-    private final Set<ClassLoader> composeProbedLoaders =
-            Collections.synchronizedSet(new HashSet<ClassLoader>());
-    /** 已 hook 的 setContent 方法（跨 loader 去重）。 */
-    private final Set<String> composeHooked =
-            Collections.synchronizedSet(new HashSet<String>());
-    /** 已打印过的 lambda 类名（去重限流；栈只随首次打印）。 */
-    private final Set<String> composeLogged =
-            Collections.synchronizedSet(new HashSet<String>());
-    /** tab_host 类名链真名打印只做一次。 */
-    private final AtomicBoolean composeTruthDone = new AtomicBoolean(false);
+    /** 加载器的短标识：够区分主/插件加载器，又不把整条 dexpath 打进日志。 */
+    private static String loaderTag(ClassLoader loader) {
+        if (loader == null) {
+            return "null";
+        }
+        return loader.getClass().getSimpleName() + "@"
+                + Integer.toHexString(System.identityHashCode(loader));
+    }
 
     // ===== khome 底栏 tab 模型探针/过滤（v1.7.0 Pegasus 专项 v2）=====
     /** HomeFrameViewModel 实例（真名类，状态中枢）。 */
@@ -176,11 +169,6 @@ public final class HomeUxHooks {
         installGroup("loader sniffer", new ThrowingAction() {
             @Override public void run() throws Throwable {
                 installLoaderSniffer();
-            }
-        });
-        installGroup("compose content probe", new ThrowingAction() {
-            @Override public void run() throws Throwable {
-                installComposeContentProbe(cl);
             }
         });
         installGroup("khome tab model probe", new ThrowingAction() {
@@ -259,11 +247,6 @@ public final class HomeUxHooks {
             installResourceManagerFilter(uiCl);
         } catch (Throwable t) {
             api.error("homeux: funnel(rm tab cache) unavailable", t);
-        }
-        try {
-            installComposeContentProbe(uiCl);
-        } catch (Throwable t) {
-            api.error("homeux: compose probe (ui loader) unavailable", t);
         }
         // 「头像→我的」的路由动作派发不挂任何钩子：点击时按 VM 的加载器现解析现缓存。
         api.info("homeux: main2 funnels installed under " + loaderTag(uiCl));
@@ -1298,211 +1281,6 @@ public final class HomeUxHooks {
                 mineTabKept = false;
             }
         }
-    }
-
-    // ===== Compose content 探针（Pegasus 底栏专项 RE，v1.7.0）=====
-
-    /**
-     * ComposeView.setContent(Function2) 是 Compose 自家公开 API（AXML 里 inflate 的
-     * View 类名不能混淆），content lambda 的实现类名 = 宿主类$函数名$N，直接暴露
-     * 底栏 composable 身份。按名尝试 androidx 两个候选类；真名以 composeTruthWalk
-     * 的设备实测为准（androidx 内部类可能被重命名，但 ComposeView 本体必真名）。
-     */
-    private void installComposeContentProbe(ClassLoader loader) {
-        if (loader == null || !composeProbedLoaders.add(loader)) {
-            return;
-        }
-        String[] candidates = {
-                "androidx.compose.ui.platform.ComposeView",
-                "androidx.compose.ui.platform.AbstractComposeView",
-        };
-        int hooked = 0;
-        for (String name : candidates) {
-            try {
-                hooked += hookSetContent(api.load(loader, name));
-            } catch (Throwable t) {
-                // 主加载器上没有 androidx 是预期 miss（插件加载器那一轮才挂得上），
-                // 只作诊断；ClassLoader.toString() 会把整条 dexpath 打出来，别贴它。
-                api.debug("compose: " + name + " absent from " + loaderTag(loader)
-                        + " (" + t.getClass().getSimpleName() + ")");
-            }
-        }
-        api.info("compose: probe install ok, hooked=" + hooked + " loader=" + loaderTag(loader));
-    }
-
-    /** 加载器的短标识：够区分主/插件加载器，又不把整条 dexpath 打进日志。 */
-    private static String loaderTag(ClassLoader loader) {
-        if (loader == null) {
-            return "null";
-        }
-        return loader.getClass().getSimpleName() + "@"
-                + Integer.toHexString(System.identityHashCode(loader));
-    }
-
-    /** 挂类上全部 setContent(单参 Function2)（含子类覆写），返回挂上数。 */
-    private int hookSetContent(Class<?> cls) {
-        int hooked = 0;
-        for (Method mm : cls.getDeclaredMethods()) {
-            if (!"setContent".equals(mm.getName()) || mm.getParameterTypes().length != 1) {
-                continue;
-            }
-            String p = mm.getParameterTypes()[0].getName();
-            if (!p.endsWith("Function2")) {
-                api.info("compose: skip " + cls.getName() + ".setContent(" + p + ")");
-                continue;
-            }
-            String key = System.identityHashCode(mm.getDeclaringClass().getClassLoader())
-                    + "#" + mm.toString();
-            if (!composeHooked.add(key)) {
-                continue;
-            }
-            try {
-                api.deoptimize(mm);
-                api.addHook("compose: " + cls.getName() + ".setContent", mm, new XposedInterface.Hooker() {
-                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                        Object result = chain.proceed();
-                        logComposeContent(chain.getThisObject(), chain.getArg(0));
-                        return result;
-                    }
-                });
-                hooked++;
-                api.info("compose: hooked " + cls.getName() + ".setContent(" + p + ")");
-            } catch (Throwable t) {
-                api.error("compose: hook " + cls.getName() + ".setContent failed", t);
-            }
-        }
-        return hooked;
-    }
-
-/**
- * 打 content lambda 真实实现类名。setContent 收到的常是 ComposableLambdaImpl
- * （composeLambda 记忆化包装），真身份在其内部 Function2 字段（block）的实现类——
- * 递归解包最多 3 层。首次出现时用 new Throwable() 抓全调用栈（hook 线程内
- * Thread.currentThread().getStackTrace() 在 LSPosed 下会截短）。
- */
-    private void logComposeContent(Object viewObj, Object lambda) {
-        try {
-            String viewCls = viewObj == null ? "null" : viewObj.getClass().getName();
-            int vid = viewObj instanceof View ? ((View) viewObj).getId() : View.NO_ID;
-            boolean tabHost = vid == TAB_HOST_VIEW_ID;
-            Object real = lambda;
-            int depth = 0;
-            while (depth < 3) {
-                Object inner = unwrapFunction2(real);
-                if (inner == null || inner == real) {
-                    break;
-                }
-                real = inner;
-                depth++;
-            }
-            String lambdaCls = lambda == null ? "null" : lambda.getClass().getName();
-            String realCls = real == null ? "null" : real.getClass().getName();
-            String key = lambdaCls + "|" + viewCls + "|" + realCls;
-            boolean first = composeLogged.add(key);
-            if (!first && !tabHost) {
-                return;
-            }
-            String stackKey = (tabHost ? "tabhost|" : "") + realCls;
-            boolean stackFirst = tabHost ? composeLogged.add(stackKey) : first;
-            Object parent = viewObj instanceof View ? ((View) viewObj).getParent() : null;
-            api.info("compose: setContent view=" + viewCls + " id=0x" + Integer.toHexString(vid)
-                    + (tabHost ? " [TAB_HOST]" : "")
-                    + " parent=" + (parent == null ? "null" : parent.getClass().getName())
-                    + " wrapper=" + lambdaCls + " real=" + realCls + " depth=" + depth
-                    + " loader=" + shortLoader(real));
-            if (depth == 0 && lambda != null && tabHost) {
-                StringBuilder fds = new StringBuilder("compose: wrapper fields[");
-                for (Class<?> k = lambda.getClass(); k != null && k != Object.class; k = k.getSuperclass()) {
-                    for (Field ff : k.getDeclaredFields()) {
-                        fds.append(k.getSimpleName()).append(".").append(ff.getName())
-                           .append(":").append(ff.getType().getName()).append(" ");
-                    }
-                }
-                api.info(fds.append("]").toString());
-            }
-            if (stackFirst) {
-                StackTraceElement[] st = new Throwable().getStackTrace();
-                StringBuilder sb = new StringBuilder("compose: stack for ").append(realCls).append(":");
-                int kept = 0;
-                for (StackTraceElement e : st) {
-                    String c = e.getClassName();
-                    if (c.startsWith("java.lang.Thread") || c.startsWith("com.tamer.bili")
-                            || "java.lang.reflect.Method".equals(c)) {
-                        continue;
-                    }
-                    sb.append("\n  at ").append(c).append(".").append(e.getMethodName());
-                    if (++kept >= 40) {
-                        break;
-                    }
-                }
-                api.info(sb.toString());
-            }
-            if (tabHost && viewObj != null && composeTruthDone.compareAndSet(false, true)) {
-                StringBuilder chain = new StringBuilder("compose: tab_host class chain:");
-                for (Class<?> k = viewObj.getClass(); k != null && k != Object.class; k = k.getSuperclass()) {
-                    chain.append("\n  ").append(k.getName());
-                }
-                api.info(chain.toString());
-            }
-        } catch (Throwable t) {
-            api.error("compose: log failed", t);
-        }
-    }
-
-    /**
-     * 在对象（沿类链）上找第一个「值实现 Function2 接口」的字段读出实例
-     * （ComposableLambdaImpl.block；声明类型可能被 R8 合并改型，按值形态判）。
-     */
-    private Object unwrapFunction2(Object o) {
-        if (o == null) {
-            return null;
-        }
-        try {
-            for (Class<?> k = o.getClass(); k != null && k != Object.class; k = k.getSuperclass()) {
-                for (Field f : k.getDeclaredFields()) {
-                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
-                        continue;
-                    }
-                    f.setAccessible(true);
-                    Object v = f.get(o);
-                    if (v != null && v != o && implementsFunction2(v.getClass())) {
-                        return v;
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        return null;
-    }
-
-    /** 值的类链（含接口）上是否有 *Function2。 */
-    private boolean implementsFunction2(Class<?> c) {
-        for (Class<?> k = c; k != null && k != Object.class; k = k.getSuperclass()) {
-            if (k.getName().endsWith("Function2")) {
-                return true;
-            }
-            for (Class<?> i : k.getInterfaces()) {
-                if (i.getName().endsWith("Function2")) {
-                    return true;
-                }
-                for (Class<?> i2 : i.getInterfaces()) {
-                    if (i2.getName().endsWith("Function2")) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    /** loader 缩写（避免整段 PathClassLoader 字符串刷屏）。 */
-    private String shortLoader(Object o) {
-        if (o == null) {
-            return "null";
-        }
-        ClassLoader l = o.getClass().getClassLoader();
-        return l == null ? "bootstrap"
-                : l.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(l));
     }
 
     // ===== khome 底栏 tab 模型探针/过滤（v2，形状锚定）=====
