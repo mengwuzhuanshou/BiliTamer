@@ -87,13 +87,19 @@ public final class BiliConfig {
     // ===== 首页推荐分区屏蔽：tname 词表（逗号分隔存储；唯一字符串键）=====
     public static final String KEY_FEED_BLOCK_TNAMES = "feed_blocked_tnames";
 
-    // ===== 首页推荐流清洗（对齐 MBGA 三项，均默认关）=====
+    // ===== 首页推荐流清洗（对齐 MBGA 三项 + 大卡片，均默认关）=====
     /** 只展示 UGC：cardGoto 非 "av" 的卡（官方合集/活动/直播等）整卡移除。 */
     public static final String KEY_FEED_ONLY_UGC = "feed_only_ugc";
     /** 干净卡片：去推荐理由角标与竖屏角标，descButton 缺失时补「UP 名 → 空间页」。 */
     public static final String KEY_FEED_CLEAN_CARD = "feed_clean_card";
     /** 禁止竖屏播放器：卡片路由 bilibili://story/<id> 改写为 bilibili://video/<id>。 */
     public static final String KEY_FEED_NO_PORTRAIT = "feed_no_portrait";
+    /** 关闭大卡片：移除占满整屏宽度的卡（轮播/大封面/内联播放），双列小卡不受影响。 */
+    public static final String KEY_FEED_NO_LARGE_CARD = "feed_no_large_card";
+
+    // ===== 播放器 =====
+    /** 干掉云视听小电视：清空弹幕回包（DmViewReply）里的 activity_meta 活动浮层。 */
+    public static final String KEY_PLAYER_NO_ACTIVITY_META = "player_no_activity_meta";
 
     // ===== 调试 =====
     public static final String KEY_DEBUG_ALIVE = "debug_alive_marker";
@@ -126,6 +132,8 @@ public final class BiliConfig {
         KEY_FEED_ONLY_UGC,
         KEY_FEED_CLEAN_CARD,
         KEY_FEED_NO_PORTRAIT,
+        KEY_FEED_NO_LARGE_CARD,
+        KEY_PLAYER_NO_ACTIVITY_META,
         KEY_LISTEN_PAUSE_AFTER_END,
         KEY_HIDE_TRIPLE,
         KEY_HIDE_VOTE,
@@ -151,10 +159,12 @@ public final class BiliConfig {
         if (KEY_HIDE_TRIPLE.equals(key)) return false;
         if (KEY_HIDE_VOTE.equals(key)) return false;
         if (KEY_HIDE_UP_PROMPT.equals(key)) return false;
-        // 首页推荐流清洗三项：会减少卡片数量/改写卡片内容，一律出厂默认关，由用户按需开启
+        // 首页推荐流清洗四项：会减少卡片数量/改写卡片内容，一律出厂默认关，由用户按需开启
         if (KEY_FEED_ONLY_UGC.equals(key)) return false;
         if (KEY_FEED_CLEAN_CARD.equals(key)) return false;
         if (KEY_FEED_NO_PORTRAIT.equals(key)) return false;
+        if (KEY_FEED_NO_LARGE_CARD.equals(key)) return false;
+        if (KEY_PLAYER_NO_ACTIVITY_META.equals(key)) return false;
         if (KEY_DEBUG_ALIVE.equals(key)) return false;
         if (KEY_VERBOSE.equals(key)) return false;
         if (KEY_PROBE.equals(key)) return false;

@@ -133,4 +133,10 @@ public interface HookApi {
 
     /** 禁止竖屏播放：卡片路由 bilibili://story/ 改写为 bilibili://video/（默认关）。 */
     boolean isFeedNoPortraitEnabled();
+
+    /** 关闭大卡片：移除占满整屏宽度的推荐卡（默认关）。 */
+    boolean isFeedNoLargeCardEnabled();
+
+    /** 干掉云视听小电视：清空弹幕回包的 activity_meta 活动浮层（默认关）。 */
+    boolean isPlayerNoActivityMetaEnabled();
 }

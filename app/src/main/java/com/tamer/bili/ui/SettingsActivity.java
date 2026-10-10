@@ -139,6 +139,10 @@ public class SettingsActivity extends Activity {
                 "隐藏互动弹幕投票面板（打分弹幕/投票）");
         addSwitch(BiliConfig.KEY_HIDE_UP_PROMPT, "隐藏 UP 提示", "Hide UP prompts",
                 "隐藏关注引导气泡等 UP 提示");
+        addSwitch(BiliConfig.KEY_PLAYER_NO_ACTIVITY_META, "干掉云视听小电视", "No activity overlay",
+                "清掉弹幕回包里的 activity_meta 活动浮层（跑动的「云视听小电视」小电视形象）。\n"
+                + "只在活动期服务端真下发时才有东西可清；日志会明确写出两种情况（清了几条 /\n"
+                + "钩子进来了但这批本来就是空的），不会静默假生效。改后需强停 B 站重开");
 
         section("首页", "Home");
         addSwitch(BiliConfig.KEY_NO_AUTO_REFRESH, "首页不自动刷新", "No auto refresh on home",
@@ -155,7 +159,7 @@ public class SettingsActivity extends Activity {
         addSwitch(BiliConfig.KEY_FEED_ONLY_UGC, "首页只展示用户上传作品（UGC）", "Show only UGC on home",
                 "移除推荐流里的官方合集、活动、直播等非用户上传卡（判据 cardGoto=av）。\n"
                 + "安全阀：若一整批卡都不匹配该判据（宿主改了口径），本批不过滤并在日志告警，\n"
-                + "不会把首页清空。三项都只影响之后发出的流请求：屏幕上已经渲染好的卡片，\n"
+                + "不会把首页清空。四项都只影响之后发出的流请求：屏幕上已经渲染好的卡片，\n"
                 + "要下拉刷新/切页/重进首页才会变。改后需强停 B 站重开");
         addSwitch(BiliConfig.KEY_FEED_CLEAN_CARD, "干净的视频卡片", "Clean video cards",
                 "卡片只留标题与 UP：去掉「推荐理由」角标和「竖屏」角标。\n"
@@ -167,6 +171,13 @@ public class SettingsActivity extends Activity {
                 + "只影响卡片跳转路由（story→video），播放页内的竖屏入口不变。改写只保留视频 id、\n"
                 + "丢掉卡片自带的预载参数（实测带着它会让横屏播放页启动即崩），代价是这类卡起播\n"
                 + "不走那条预载、多 P 稿件从第一 P 解析。改后需强停 B 站重开");
+        addSwitch(BiliConfig.KEY_FEED_NO_LARGE_CARD, "关闭大卡片", "No large cards",
+                "移除占满整屏宽度的卡（顶部轮播大图、单列大封面卡、内联播放卡），只留双列小卡。\n"
+                + "判据是卡片类型名（banner_v / large_cover / inline_av），跟「只展示 UGC」互不\n"
+                + "依赖：实测 6.6.0 上开着只展示 UGC 时大卡确实全没了（轮播卡 goto=banner、\n"
+                + "大封面卡 goto=inline_av_v2，都不是 av 所以被顺手删掉），但那个开关同时还会\n"
+                + "删直播卡和广告卡；只想去掉大卡、其它照旧，就开这一个。横幅广告卡不在本开关\n"
+                + "判据内（它也有双列形态，按类型删会连双列广告一起删掉）。改后需强停 B 站重开");
 
         section("首页推荐分区屏蔽", "Feed partition blocker");
         LinearLayout tagRow = new LinearLayout(this);

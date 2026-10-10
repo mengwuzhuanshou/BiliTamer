@@ -132,7 +132,9 @@ public class MainHook extends XposedModule implements HookApi {
                     + " feed_blocked_tnames=" + feedWordCount() + " word(s)"
                     + " feed_only_ugc=" + isFeedOnlyUgcEnabled()
                     + " feed_clean_card=" + isFeedCleanCardEnabled()
-                    + " feed_no_portrait=" + isFeedNoPortraitEnabled());
+                    + " feed_no_portrait=" + isFeedNoPortraitEnabled()
+                    + " feed_no_large_card=" + isFeedNoLargeCardEnabled()
+                    + " player_no_activity_meta=" + isPlayerNoActivityMetaEnabled());
         } catch (Throwable t) {
             warn("logConfig failed: " + t);
         }
@@ -235,6 +237,11 @@ public class MainHook extends XposedModule implements HookApi {
             install("FeedCleanHooks", new ThrowingAction() {
                 @Override public void run() throws Throwable {
                     new FeedCleanHooks(MainHook.this, cl).install();
+                }
+            });
+            install("DmActivityMetaHooks", new ThrowingAction() {
+                @Override public void run() throws Throwable {
+                    new com.tamer.bili.hooks.DmActivityMetaHooks(MainHook.this, cl).install();
                 }
             });
             install("AccelHooks(main)", new ThrowingAction() {
@@ -694,6 +701,20 @@ public class MainHook extends XposedModule implements HookApi {
         BiliConfig c = config;
         return c != null && c.get(BiliConfig.KEY_FEED_NO_PORTRAIT,
                 BiliConfig.defaultValueOf(BiliConfig.KEY_FEED_NO_PORTRAIT));
+    }
+
+    @Override
+    public boolean isFeedNoLargeCardEnabled() {
+        BiliConfig c = config;
+        return c != null && c.get(BiliConfig.KEY_FEED_NO_LARGE_CARD,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_FEED_NO_LARGE_CARD));
+    }
+
+    @Override
+    public boolean isPlayerNoActivityMetaEnabled() {
+        BiliConfig c = config;
+        return c != null && c.get(BiliConfig.KEY_PLAYER_NO_ACTIVITY_META,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_PLAYER_NO_ACTIVITY_META));
     }
 
     // ===== 日志 =====

@@ -73,7 +73,14 @@ import io.github.libxposed.api.XposedInterface;
  *     验收口径也因此比①②更严：
  *     落点=横屏播放页 + 进程存活 + 崩溃缓冲 0 条，三条同查。
  *
- * 三项都会改变用户能看到/点到什么，出厂默认关。①另有安全阀：一整批都不匹配 UGC
+ *  ④ 关闭大卡片（{@code feed_no_large_card}）：移除占满整屏宽度的卡（轮播 {@code banner_v8}、
+ *     单列大封面 {@code large_cover_*}、内联播放 {@code inline_av}/{@code ad_inline_av}）。
+ *     判据用 {@code card_type} 而不是①的 {@code card_goto}——现场实测两者重叠
+ *     （{@code large_cover_v9} 的 goto 是 {@code inline_av_v2}，①本来就删得掉），这条留着
+ *     是为了「只去大卡、别动直播/广告卡」这个①给不了的诉求，也为了两条判据互相备份；
+ *     取证与代价见 {@link #applyNoLargeCard}。
+ *
+ * 四项都会改变用户能看到/点到什么，出厂默认关。①另有安全阀：一整批都不匹配 UGC
  * 判据时不过滤并告警（宿主改口径时最坏退化成「不生效」，不会首页空白）；
  * 单卡判据读不到按「未知」保留。
  */
@@ -99,6 +106,9 @@ public final class FeedCleanHooks {
     private final AtomicBoolean rewriteLogged = new AtomicBoolean(false);
     /** 第一条 story 卡的写回成败（一次性；静默失败和没进来必须能区分）。 */
     private final AtomicBoolean storyDiag = new AtomicBoolean(false);
+    /** ④「移除后这批还剩哪些 card_type」：最多印 3 批，用来给漏网的跨列卡定名。 */
+    private final java.util.concurrent.atomic.AtomicInteger largeHistBudget =
+            new java.util.concurrent.atomic.AtomicInteger(3);
 
     public FeedCleanHooks(HookApi api, ClassLoader cl) {
         this.api = api;
@@ -106,7 +116,8 @@ public final class FeedCleanHooks {
     }
 
     public void install() {
-        installGroup("feed card filter (ugc only + clean card + story route)", new ThrowingAction() {
+        installGroup("feed card filter (ugc only + clean card + story route + no large card)",
+                new ThrowingAction() {
             @Override public void run() throws Throwable {
                 installParseFilter();
             }
@@ -144,8 +155,9 @@ public final class FeedCleanHooks {
                             boolean ugc = api.isFeedOnlyUgcEnabled();
                             boolean clean = api.isFeedCleanCardEnabled();
                             boolean noPortrait = api.isFeedNoPortraitEnabled();
+                            boolean noLarge = api.isFeedNoLargeCardEnabled();
                             // 探针与开关无关地跑一次：关闭对照轮同样需要这份现场值域
-                            if (ugc || clean || noPortrait || !anchorProbed.get()) {
+                            if (ugc || clean || noPortrait || noLarge || !anchorProbed.get()) {
                                 List<?> items = FeedItems.findItems(api, result);
                                 if (items != null && !items.isEmpty()) {
                                     if (!anchorProbed.get()) {
@@ -153,6 +165,9 @@ public final class FeedCleanHooks {
                                     }
                                     if (noPortrait) {
                                         applyStoryRewrite(items);
+                                    }
+                                    if (noLarge) {
+                                        applyNoLargeCard(items);
                                     }
                                     if (ugc) {
                                         applyOnlyUgc(items);
@@ -220,6 +235,91 @@ public final class FeedCleanHooks {
     private String cardGotoOf(Object item) {
         Object v = FeedItems.readProp(FeedItems.cardOf(item), "cardGoto");
         return v instanceof String ? (String) v : null;
+    }
+
+    /**
+     * ④：移除占满整屏宽度的卡（轮播大图、单列大封面卡、内联播放卡）。
+     *
+     * 判据是 {@code card_type} 子串，不是卡片宽度，也不复用①的 {@code card_goto=="av"}——
+     * 但**两者现场实测是重叠的**，这一点推翻了我最初的静态推断，值得留字：
+     * 我原先按老一代 pegasus 的常识判定「{@code large_cover_v9} 是标准 UGC、
+     * {@code card_goto} 就是 {@code av}，所以①挡不住它、必须另开一条判据」；装机后
+     * ④的移除日志给出的是 {@code [large_cover_v9/inline_av_v2]}——这代宿主给这种卡打的
+     * goto 是 {@code inline_av_v2}，**①本来就把它删了**（①开着连滑 5 屏、约 40 张卡，
+     * uiautomator 里全是 521 宽的双列卡，一个跨列卡都没有）。
+     *
+     * 那这条开关为什么还留：①的口径是「只要 UGC」，会顺手删掉直播卡、广告卡和跨列内容卡，
+     * 而「我不想首页有大卡，但直播/广告卡无所谓」是另一个诉求，①给不了；④只删跨列卡，
+     * 双列卡一张不动。另外①的判据整个押在 {@code card_goto} 的取值上（服务端换口径就漂），
+     * ④押在类型名上，两条互相备份。
+     *
+     * 三个子串是宿主 dex 里核过的跨列类型名（classes17 的类型常量表 + classes10/11）：
+     * {@code banner_v*}（轮播，现场 {@code id/banner} 宽 1054/1080）、
+     * {@code large_cover}（{@code large_cover_v7~v9}、{@code large_cover_single_v7~v13}、
+     * {@code vertical_large_cover_v7/v9/v11}、{@code channel_detail_large_cover}）、
+     * {@code inline_av}（{@code inline_av}、{@code ad_inline_av}）。双列卡类型名
+     * {@code small_cover_v2}/{@code small_cover_v9}/{@code cm_v2}/{@code ogv_small_cover}
+     * 一个都不含，不会误伤（现场直方图印证：移除后剩 {@code {small_cover_v2=6, cm_v2=1,
+     * small_cover_v9=1}}）。
+     *
+     * **{@code cm_v2}（横幅广告卡）故意不纳入**：它现场也是整屏宽的（实测一张 1054x327，
+     * 节点带 {@code disallow_slide}/{@code corner_hint}/{@code tag_img}），但它同时也会
+     * 以双列小卡出现，按类型名删就等于替用户决定「广告一律删」——那归①管
+     * （{@code cm_v2} 的 goto 是 {@code ad_av}/{@code ad_web_s}，非 av，①开着时实测会删）。
+     *
+     * 读不到 {@code card_type} 的卡按未知保留（与①同口径：失败模式退化成「少过滤」，
+     * 不是把首页清空）。移除日志与「移除后本批还剩哪些类型」的直方图（前 3 批）都打：
+     * 只印一次的话，用户往后滚动时「还在生效吗」在日志里就没有答案了，而漏网的跨列卡
+     * 也永远定不了名。
+     */
+    private static final String[] LARGE_CARD_KEYS = {"banner_v", "large_cover", "inline_av"};
+
+    private void applyNoLargeCard(List<?> items) {
+        ArrayList<String> removedTypes = new ArrayList<String>();
+        int removed = 0;
+        for (int i = items.size() - 1; i >= 0; i--) {
+            Object item = items.get(i);
+            String type = cardTypeOf(FeedItems.cardOf(item));
+            if (type == null || !isLargeCardType(type)) {
+                continue;
+            }
+            items.remove(i);
+            removed++;
+            if (removedTypes.size() < 6 && !removedTypes.contains(type)) {
+                removedTypes.add(type + "/" + cardGotoOf(item));
+            }
+        }
+        if (removed > 0) {
+            api.info("feedbig: removed " + removed + " large card(s) [" + removedTypes
+                    + "] from a batch of " + items.size());
+        }
+        if (largeHistBudget.getAndDecrement() > 0) {
+            // 移除**之后**的直方图：屏幕上量得到的跨列卡（宽度只有现场知道）如果还留在这张
+            // 表里，它叫什么类型名就一目了然，判据据此补而不是靠猜。
+            HashMap<String, Integer> hist = new HashMap<String, Integer>();
+            for (int i = 0; i < items.size(); i++) {
+                String t = cardTypeOf(FeedItems.cardOf(items.get(i)));
+                String k = t == null ? "?" : t;
+                Integer c = hist.get(k);
+                hist.put(k, Integer.valueOf(c == null ? 1 : c.intValue() + 1));
+            }
+            api.info("feedbig: card_type histogram left in this batch " + hist);
+        }
+    }
+
+    /** card_type 读取（与探针同一路：getter 优先、字段兜底）。 */
+    private String cardTypeOf(Object card) {
+        Object v = FeedItems.readProp(card, "cardType");
+        return v instanceof String ? (String) v : null;
+    }
+
+    private static boolean isLargeCardType(String type) {
+        for (int i = 0; i < LARGE_CARD_KEYS.length; i++) {
+            if (type.contains(LARGE_CARD_KEYS[i])) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

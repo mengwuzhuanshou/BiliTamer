@@ -69,6 +69,18 @@ public final class AccelSelfTest {
          * 假 CDN 原本瞬间给完整块，量不出「第一个字节等了多大一口」这件事 —— 起播 0 KB 就是这么溜过去的。
          */
         long paceNsPerByte;
+        /**
+         * 只挂起「1 字节请求」多少毫秒：黑洞节点（TCP 连上了就是不吐字节）长这样。
+         * 只对探路成立，是因为起播那段永远要几十 KB，判据 {@code end == start} 分得开两者。
+         */
+        long probeHangMs;
+
+        /** 按宿主压定的响应头延迟：黑洞节点（连上就是不吐字节）按地址布置，不用赌时序。 */
+        final Map<String, Long> ttfbByHost = new HashMap<String, Long>();
+
+        void ttfb(String host, long ms) {
+            ttfbByHost.put(host, Long.valueOf(ms));
+        }
 
         FakeCdn(int size) {
             file = new byte[size];
@@ -121,6 +133,13 @@ public final class AccelSelfTest {
                         }
                         if (slowFrom >= 0L && start >= slowFrom) {
                             Thread.sleep(slowMs);
+                        }
+                        if (probeHangMs > 0L && end == start) {
+                            Thread.sleep(probeHangMs);
+                        }
+                        Long ttfb = ttfbByHost.get(host);
+                        if (ttfb != null) {
+                            Thread.sleep(ttfb.longValue());
                         }
                         return reply(host, start, end, mode);
                     } catch (InterruptedException e) {
@@ -1080,12 +1099,114 @@ public final class AccelSelfTest {
                         "第 " + (i + 1) + " 条流起播就知道总长");
                 int head = totalHits(cdn);
                 // hits 按宿主记账、两条流的候选宿主是重叠的，所以这里只能看总数：两条流各两次。
-                check(head <= 4, "两条流的起播各只花两次请求（1 字节探路 + 一条边收边吐）：共 "
+                check(head <= 4, "两条流的起播各只花两次请求（一条边收边吐 + 一次探路答复就收队）：共 "
                         + head + " 次");
             }
         } finally {
             downloader.shutdown();
         }
+    }
+
+    /**
+     * 起播只该付一次往返。真机 v1.8.0 的常驻读数是「探路 858~948 ms，然后才发第一个真实请求」，
+     * 首字节 1000~1276 ms —— 比换掉整块起播之前还慢，用户反馈的「开局卡 0 KB，而且更严重」就是这两段串联。
+     *
+     * <p>这里把每个请求的头压成 300 ms 才回（真机一个往返的量级）：探路串在起播前面的下界是 600 ms，
+     * 只有让起播请求和探路同时出发才可能落进 450 ms。
+     */
+    private static void testStartupPaysOneRoundTrip() {
+        section("首字节只等一次往返：探路不能串在起播请求前面");
+
+        FakeCdn cdn = new FakeCdn(2 * 1024 * 1024);
+        cdn.slowFrom = 0L;
+        cdn.slowMs = 300L;
+        AccelConfig cfg = testConfig();
+        cfg.minChunkBytes = 256L * 1024L;
+        cfg.maxChunkBytes = 256L * 1024L;
+        cfg.windowBytes = 512L * 1024L;
+        PieceDownloader downloader = new PieceDownloader(cdn.transport(), cfg);
+        CancelToken token = new CancelToken();
+        CdnResolver resolver = resolverFor(url(HOSTS[0], "rt"), null, CdnResolver.MODE_MAINLAND,
+                new CdnResolver.BanList(2));
+        FirstByteSink sink = new FirstByteSink(token);
+        long startedAt = System.currentTimeMillis();
+        try {
+            downloader.stream(resolver, null, 0L, -1L, sink, token);
+        } catch (IOException ignored) {
+            // 第一个字节就自己收了场，收尾怎么断不算失败。
+        }
+        downloader.shutdown();
+        check(sink.firstAtMs > 0L, "首字节拿到了");
+        long waited = sink.firstAtMs - startedAt;
+        System.out.println("  实测首字节 " + waited + " ms（每请求 TTFB 300 ms，共 "
+                + totalHits(cdn) + " 次请求）");
+        check(waited < 450L, "首字节只等一次往返：" + waited + " ms（串行探路要 600 ms 起）");
+    }
+
+    /**
+     * 探路全是黑洞（连上就是不吐字节）时，起播不能陪着等满预算：真机 v1.8.0 在这条路上
+     * 会把 {@code PROBE_FIRST_WAIT_MS} 整段等满，播放器就在 0 KB 上干等一整个预算。
+     */
+    private static void testBlackholeProbesDoNotDelayStartup() {
+        section("探路全是黑洞：起播请求不等探路的答复");
+
+        FakeCdn cdn = new FakeCdn(2 * 1024 * 1024);
+        cdn.probeHangMs = 1500L;      // 比探路预算长：这些答复永远赶不上
+        AccelConfig cfg = testConfig();
+        cfg.minChunkBytes = 256L * 1024L;
+        cfg.maxChunkBytes = 256L * 1024L;
+        cfg.windowBytes = 512L * 1024L;
+        PieceDownloader downloader = new PieceDownloader(cdn.transport(), cfg);
+        CancelToken token = new CancelToken();
+        CdnResolver resolver = resolverFor(url(HOSTS[0], "bh"), null, CdnResolver.MODE_MAINLAND,
+                new CdnResolver.BanList(2));
+        FirstByteSink sink = new FirstByteSink(token);
+        long startedAt = System.currentTimeMillis();
+        try {
+            downloader.stream(resolver, null, 0L, -1L, sink, token);
+        } catch (IOException ignored) {
+        }
+        downloader.shutdown();
+        check(sink.firstAtMs > 0L, "黑洞探路下仍有首字节");
+        long waited = sink.firstAtMs - startedAt;
+        System.out.println("  实测首字节 " + waited + " ms（探路全挂 1500 ms，共 "
+                + totalHits(cdn) + " 次请求）");
+        check(waited < 300L, "起播没被探路拖住：" + waited + " ms");
+    }
+
+    /**
+     * 并行起播的另一半：黑洞候选不能靠「读超时」收场。
+     * 下发原址压成 4 s 才回响应头，探路在别的候选上问到了活 —— 主线程要在那个观察窗口之后
+     * 直接改投，而不是陪着它等满 cfg 的超时；被顶掉那条连接之后也不许再往播放器写一个字节。
+     */
+    private static void testStartupSwitchesAwayFromBlackholeNode() {
+        section("起播候选是黑洞、探路问到了活：立刻改投，不等它的超时");
+
+        FakeCdn cdn = new FakeCdn(2 * 1024 * 1024);
+        cdn.ttfb(HOSTS[0], 4000L);      // 下发原址排在候选首位：起播那条就是它
+        AccelConfig cfg = testConfig();
+        cfg.firstByteTimeoutMs = 6000;  // 给黑洞足够长的预算，看换节点是不是靠超时
+        cfg.stallTimeoutMs = 6000;
+        cfg.minChunkBytes = 256L * 1024L;
+        cfg.maxChunkBytes = 256L * 1024L;
+        cfg.windowBytes = 512L * 1024L;
+        PieceDownloader downloader = new PieceDownloader(cdn.transport(), cfg);
+        CancelToken token = new CancelToken();
+        CdnResolver resolver = resolverFor(url(HOSTS[0], "ho"), null, CdnResolver.MODE_MAINLAND,
+                new CdnResolver.BanList(2));
+        FirstByteSink sink = new FirstByteSink(token);
+        long startedAt = System.currentTimeMillis();
+        try {
+            downloader.stream(resolver, null, 0L, -1L, sink, token);
+        } catch (IOException ignored) {
+        }
+        downloader.shutdown();
+        check(sink.firstAtMs > 0L, "改投之后仍拿到首字节");
+        long waited = sink.firstAtMs - startedAt;
+        int doomed = cdn.hitsFor(url(HOSTS[0], "ho"));
+        System.out.println("  实测首字节 " + waited + " ms（原址挂 4 s，黑洞宿主被问了 " + doomed + " 次）");
+        check(waited < 800L, "没陪着黑洞等超时：" + waited + " ms");
+        check(doomed <= 1, "被顶掉的起播连接没有重来：" + doomed + " 次");
     }
 
     /** 清单只在连接结束时刷盘的话，进程被杀就把覆盖表留在内存里了：见 {@link #testIndexSurvivesWithoutClose}。 */
@@ -1991,6 +2112,9 @@ public final class AccelSelfTest {
         testAbandonExitsPromptly();
         testShallowConsumerStaysShallow();
         testStartupHeadFlushesIncrementally();
+        testStartupPaysOneRoundTrip();
+        testBlackholeProbesDoNotDelayStartup();
+        testStartupSwitchesAwayFromBlackholeNode();
         testTotalFailure(cdn);
         testProxy();
         testProxyChunked();

@@ -51,6 +51,8 @@ public final class AccelProxy implements Closeable {
     private final AccelEngine engine;
     private final ServerSocket server;
     private final AtomicInteger streams = new AtomicInteger();
+    /** 被并发上限挡掉过的连接数：只有这个数能区分「节点慢」和「播放器压根没被收进来」。 */
+    private final AtomicInteger rejected = new AtomicInteger();
     private final java.util.concurrent.ExecutorService acceptPool;
     private volatile boolean running;
     private volatile BlockCache.Factory cacheFactory;
@@ -143,12 +145,20 @@ public final class AccelProxy implements Closeable {
 
     private void handleAsync(final Socket socket) {
         if (streams.incrementAndGet() > MAX_STREAMS) {
+            int n = streams.get();
             streams.decrementAndGet();
             try {
                 writeSimple(socket.getOutputStream(), 503, "Service Unavailable", "text/plain",
                         "accel busy".getBytes("UTF-8"));
             } catch (IOException ignored) {
                 // 拒绝失败也无所谓：播放器只会看到连接断开。
+            }
+            // 这条必须有：拒客是在我们这一侧发生的，而播放器那边只表现为「连上就断、界面 0 KB」。
+            // 没有这行，「节点慢」和「我们把连接挡在门外」在日志里长得一模一样。逐条记前 20 次，
+            // 之后每 50 次一条累计数（与改写计数同一套限流口径）。
+            int r = rejected.incrementAndGet();
+            if (r <= 20 || (r - 20) % 50 == 0) {
+                engine.log("accel| busy: rejected #" + r + " (live=" + n + " over max=" + MAX_STREAMS + ")");
             }
             close(socket);
             return;
@@ -228,7 +238,9 @@ public final class AccelProxy implements Closeable {
         OutputStream out = new BufferedOutputStream(socket.getOutputStream(), 64 * 1024);
         CdnResolver resolver = engine.resolverFor(original, null);
         boolean head = "HEAD".equalsIgnoreCase(request.method);
-        StreamingSink sink = new StreamingSink(out, end, rangeRequested(request), head);
+        // 起播账面从这一刻开始计时：live 取的是代理此刻在管的连接数，与限流判据同一个数。
+        PieceDownloader.Startup startup = engine.downloader().newStartup(streams.get());
+        StreamingSink sink = new StreamingSink(out, end, rangeRequested(request), head, startup);
         BlockCache cache = openCache(original);
         long from = start;
         // 盘上吐出去的字节要在吐的那一刻就记，不能等 serveCached 返回：真机一次回放的六条流
@@ -244,7 +256,8 @@ public final class AccelProxy implements Closeable {
                     : cache != null && cache.total() > 0L ? cache.total() - 1L : -1L;
             if (lastWanted < 0L || from <= lastWanted) {
                 // 盘上没有的部分才问 CDN；取到的一路过同一块缓存落盘。
-                engine.downloader().stream(resolver, forward, from, end, writeThrough(sink, cache), token);
+                engine.downloader().stream(resolver, forward, from, end, writeThrough(sink, cache), token,
+                        startup);
             }
         } catch (IOException e) {
             // 带上客户端到底要了哪一段 + 每个节点此刻的健康度：只有「written=X promised=Y」
@@ -389,12 +402,15 @@ public final class AccelProxy implements Closeable {
         private boolean headersSent;
         long written;
         private long limit = -1L;
+        private final PieceDownloader.Startup startup;
 
-        StreamingSink(OutputStream out, long requestEnd, boolean ranged, boolean headOnly) {
+        StreamingSink(OutputStream out, long requestEnd, boolean ranged, boolean headOnly,
+                      PieceDownloader.Startup startup) {
             this.out = out;
             this.requestEnd = requestEnd;
             this.ranged = ranged;
             this.headOnly = headOnly;
+            this.startup = startup;
         }
 
         boolean started() {
@@ -430,6 +446,8 @@ public final class AccelProxy implements Closeable {
                 out.write('\n');
             }
             out.flush();
+            // 播放器能看见字节的这一刻才是「0 KB」结束的时间点；firstByte 自己幂等。
+            startup.firstByte();
         }
 
         @Override

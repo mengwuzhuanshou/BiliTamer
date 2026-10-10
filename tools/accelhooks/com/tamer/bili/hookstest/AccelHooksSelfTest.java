@@ -598,6 +598,8 @@ public final class AccelHooksSelfTest {
         @Override public boolean isFeedOnlyUgcEnabled() { return false; }
         @Override public boolean isFeedCleanCardEnabled() { return false; }
         @Override public boolean isFeedNoPortraitEnabled() { return false; }
+        @Override public boolean isFeedNoLargeCardEnabled() { return false; }
+        @Override public boolean isPlayerNoActivityMetaEnabled() { return false; }
         @Override public boolean isVerboseLoggingEnabled() { return false; }
         @Override public boolean isProbeEnabled() { return false; }
         @Override public String getFeedBlockedTnames() { return ""; }

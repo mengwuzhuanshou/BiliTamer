@@ -38,6 +38,8 @@ An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`,
 | 首页只展示 UGC UGC-only feed | 移除官方合集/活动/直播等非用户上传卡（判据 `cardGoto=av`）；整批都不匹配时不过滤并告警，不会清空首页 / Drop non-UGC feed cards; a batch with no match is left untouched instead of blanking the feed | 关 off |
 | 干净的视频卡片 Clean video cards | 去掉卡片上的「竖屏」「1万点赞」这类角标文字与推荐理由，UP 入口沿用宿主自己的名字行（实测点它本来就进空间页）；锚点按服务端协议名定位，宿主改名不至于静默失效 / Strip the "portrait" and "10k likes" style badges and recommendation reasons from feed cards; the UP entry stays the host's own name line, which already opens the author space. Anchors resolve by protocol name so a host rename can't fail silently | 关 off |
 | 禁止竖屏播放器 No portrait player | 首页竖屏卡的跳转路由 `bilibili://story/<id>` 改写为 `bilibili://video/<id>`，落进传统横屏播放器；只保留 id、丢掉卡片自带的预载参数段（带着它会让横屏播放页在启动时崩，见 PITFALLS #40）/ Rewrite story routes on feed cards to the landscape player's own minimal route (id only — the card's preload query is dropped, because keeping it crashes the target page; see PITFALLS #40) | 关 off |
+| 关闭大卡片 No large cards | 按 `card_type` 移除占满整屏宽度的卡（轮播 `banner_v*`、大封面 `large_cover_v*`、内联播放 `inline_av_*`），双列小卡与直播/广告卡不受影响 / Drop full-width feed cards (carousel, large-cover, inline-play) by `card_type`; two-column small cards, live and ad cards are untouched | 关 off |
+| 干掉云视听小电视 No activity overlay | 清空弹幕回包 `DmViewReply` 里的 `activity_meta` 活动浮层素材（视频内下发的活动挂件）/ Clear the `activity_meta` activity-overlay material from the dm reply | 关 off |
 | 配置同步 Config sync | 设置保存经启动投递+host-conf 代次协议生效，不依赖 root / Settings delivered at launch with a host-conf generation protocol — no root needed | — |
 
 所有开关独立可逆；总开关关闭后模块完全休眠。
@@ -133,6 +135,9 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
     │       │   ├── PlayerCodecHooks.java   # 解码/音质/HDR 顺位 / codec & audio & HDR preference
     │       │   ├── ListenPauseHooks.java   # 听视频听完暂停 / pause after video
     │       │   ├── InteractHintHooks.java  # 隐藏互动提示 / hide interaction hints
+    │       │   ├── FeedCleanHooks.java     # 首页推荐流四项 / the four home-feed rewrites
+    │       │   ├── DmActivityMetaHooks.java # 干掉云视听小电视 / clear dm activity_meta
+    │       │   ├── FeedTagHooks.java       # 首页推荐分区屏蔽 / feed partition blocker
     │       │   └── HomeNoAutoRefreshHooks.java # 首页不自动刷新 / no home auto-refresh
     │       └── ui/SettingsActivity.java    # 纯代码设置界面 / code-only settings UI
     └── PITFALLS.md                     # 实现笔记与坑 / implementation notes & pitfalls
@@ -155,11 +160,21 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
   默认的评论区限定模式无此副作用 / The international comment area currently has no ads;
   banner ads only appear when the legacy global identity declaration is used — the default
   scoped mode has no such side effect;
-* 首页三项（只展示 UGC／干净卡片／禁止竖屏）挂在推荐流的协议解析出口上：只影响**之后
+* 首页四项（只展示 UGC／干净卡片／禁止竖屏／关闭大卡片）挂在推荐流的协议解析出口上：只影响**之后
   发出的流请求**，屏幕上已经渲染好的那批卡要等下拉刷新/切页/重进首页才会被改写 /
-  The three home-feed switches act at the protocol parse exit, so they only affect
+  The four home-feed switches act at the protocol parse exit, so they only affect
   subsequent feed requests — cards already rendered change after a pull-to-refresh,
   a tab switch or a relaunch;
+* 「关闭大卡片」按 `card_type` 子串判跨列卡，值域只在 6.6.0 上取过现场样本；服务端换卡型命名后
+  这一项会退化成「什么都不删」（读不到 `card_type` 的卡按未知保留，不会误删）/ The large-card
+  removal matches `card_type` substrings sampled on 6.6.0 only; if the server renames card types
+  it degrades to removing nothing (cards without a readable `card_type` are kept, not guessed
+  away);
+* 「干掉云视听小电视」只证到**清空**：挂点命中、`activity_meta` 条目被清掉都有实机日志，但浮层
+  从屏幕上消失需要在活动期拿同一稿件肉眼 A/B，本版未做，不声称已证 / The activity-overlay switch
+  is verified down to *clearing* the field (hook hit and cleared entries are in the log); the
+  visual disappearance was not A/B'd on the same video during an active campaign, so it is
+  not claimed;
 * 「禁止竖屏播放器」丢掉卡片自带的预载参数段（这是不崩的前提），因此竖屏卡在横屏播放页
   起播时不走那条预载、分 P 固定从第一 P 解析 / Dropping the preload query (required to keep
   the target page from crashing) means those videos start without that preload hint and
@@ -182,7 +197,7 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
 | --- | --- | --- |
 | **BiliFix** (com.xjw.bilifix.in) | 身份声明思路与 libxposed 打包范式的启蒙参考（本模块与其无代码派生关系）/ the inspiration for the identity-declaration approach and libxposed packaging (no code derived from it) | https://github.com/xiaojiuwo233/BiliFix |
 | **libxposed/api** | 现代 Xposed API / the modern Xposed API | https://github.com/libxposed/api |
-| **MBGA** (top.trangle.mbga) | 首页三项功能（只展示 UGC／干净卡片／禁止竖屏）的语义来源：本版按 6.6.0 的新接缝与新城载体重写，未复用其代码 / the origin of the three home-feed features' semantics — reimplemented against this host's own seams and card models, no code reused | https://github.com/cledwynl/mbga |
+| **MBGA** (top.trangle.mbga) | 首页三项功能（只展示 UGC／干净卡片／禁止竖屏）与「干掉云视听小电视」的语义来源：本版按 6.6.0 的新接缝与新城载体重写，未复用其代码；「关闭大卡片」是本版自己加的（判据 `card_type`）/ the origin of the three home-feed features and the activity-overlay switch's semantics — reimplemented against this host's own seams and card models, no code reused; the large-card switch is this module's own addition (matched by `card_type`) | https://github.com/cledwynl/mbga |
 | **AOSP dx / apksig** | 构建链组件（Apache-2.0）/ build-chain components | https://android.googlesource.com |
 
 ## 许可证 / License
