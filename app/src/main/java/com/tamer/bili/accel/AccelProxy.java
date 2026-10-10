@@ -39,8 +39,14 @@ public final class AccelProxy implements Closeable {
     /** 代理路径前缀；播放器地址只替换 host:port + 这个路径，签名原样带在 u 参数里。 */
     public static final String PATH = "/accel";
 
-    /** 同时在流的最大连接数：超了直接拒绝，让播放器走原生路径，绝不排队卡住起播。 */
-    private static final int MAX_STREAMS = 12;
+    /**
+     * 同时在流的最大连接数。真机实测：这个播放器的并行 range 连接会冲到 13，旧值 12 一被打满就
+     * 503 拒客，而播放器并不会「优雅回落原生」——它把整批并行读拆掉重连，重连又叠在还没排干的
+     * 旧连接上再次越过上限，形成正反馈：界面 0 KB、偶尔跳 2 KB、隔几秒才自愈。播放器 socket 很
+     * 廉价，真正的上游并发由下载器 {@code PrioritySemaphore}（concurrency）把关，这里只兜底防
+     * 极端泄漏，所以放到 64 让拒客这条正反馈根本触发不了。
+     */
+    private static final int MAX_STREAMS = 64;
 
     /** 单条连接读请求头的上限（B 站下发地址带长 query，留足余量）。 */
     private static final int MAX_HEADER_BYTES = 64 * 1024;

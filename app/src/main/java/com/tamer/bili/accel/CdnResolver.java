@@ -65,8 +65,17 @@ public final class CdnResolver {
      * HTTP 4xx 既可能是节点缺文件，也可能是这份签名地址被所有节点拒绝——谁交付过数据谁说话。
      */
     public static final class BanList {
+        /**
+         * 封禁时效：一次网络抖动不该把节点永久毒化到进程重启。真机实测宿主主进程连跑两天，
+         * {@code emptyReplies} 只增不减 → 每个节点攒够 2 次空响应就永久封 → 可用节点越缩越少，
+         * 最终代理被饿死（界面 0 KB/s，强停重启才恢复）。给 strike 记时间戳并按时效淘汰，
+         * 让长命进程能自愈。
+         */
+        private static final long STRIKE_TTL_MS = 120000L;
+
         private final int limit;
         private final Map<String, Integer> emptyReplies = new HashMap<String, Integer>();
+        private final Map<String, Long> lastStrikeAt = new HashMap<String, Long>();
         private final Set<String> goodNodes = new HashSet<String>();
         private final Set<String> goodAddresses = new HashSet<String>();
         private final Set<String> reported = new HashSet<String>();
@@ -101,6 +110,7 @@ public final class CdnResolver {
             String key = host + "\n" + RangeCore.addressOf(url) + "\n" + (refused ? "refused" : "");
             Integer old = emptyReplies.get(key);
             emptyReplies.put(key, Integer.valueOf(old == null ? 1 : old.intValue() + 1));
+            lastStrikeAt.put(key, Long.valueOf(System.currentTimeMillis()));
             return judge();
         }
 
@@ -117,6 +127,15 @@ public final class CdnResolver {
         }
 
         private boolean judge() {
+            long now = System.currentTimeMillis();
+            Iterator<Map.Entry<String, Long>> lit = lastStrikeAt.entrySet().iterator();
+            while (lit.hasNext()) {
+                Map.Entry<String, Long> e = lit.next();
+                if (now - e.getValue().longValue() > STRIKE_TTL_MS) {
+                    lit.remove();
+                    emptyReplies.remove(e.getKey());
+                }
+            }
             Map<String, Integer> strikes = new HashMap<String, Integer>();
             Iterator<Map.Entry<String, Integer>> it = emptyReplies.entrySet().iterator();
             while (it.hasNext()) {
@@ -163,7 +182,23 @@ public final class CdnResolver {
             return added;
         }
 
+        /** 惰性淘汰：距上次 strike 超过时效就重算封禁表，让节点在长命进程里能自动解禁。 */
+        private void expireLocked() {
+            if (banned.isEmpty()) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            Iterator<Map.Entry<String, Long>> it = lastStrikeAt.entrySet().iterator();
+            while (it.hasNext()) {
+                if (now - it.next().getValue().longValue() > STRIKE_TTL_MS) {
+                    judge();
+                    return;
+                }
+            }
+        }
+
         public synchronized boolean allows(String url) {
+            expireLocked();
             String host = RangeCore.hostOf(url);
             String address = RangeCore.addressOf(url);
             return !banned.contains(nodeKey(host)) && !banned.contains(addressKey(address))
@@ -171,6 +206,7 @@ public final class CdnResolver {
         }
 
         public synchronized boolean allowsNode(String url) {
+            expireLocked();
             return !banned.contains(nodeKey(RangeCore.hostOf(url)));
         }
 
@@ -188,6 +224,7 @@ public final class CdnResolver {
 
         public synchronized void reset() {
             emptyReplies.clear();
+            lastStrikeAt.clear();
             goodNodes.clear();
             goodAddresses.clear();
             reported.clear();

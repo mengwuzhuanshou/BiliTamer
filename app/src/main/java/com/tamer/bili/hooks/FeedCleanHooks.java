@@ -393,10 +393,21 @@ public final class FeedCleanHooks {
         return !(up instanceof String) || ((String) up).length() > 0;
     }
 
+    /** {@code args.up_name} 的真值（6.6.0 名字源）；读不到或空串返回 null。 */
+    private String upNameOf(Object card) {
+        Object args = FeedItems.readJson(card, "args");
+        if (args == null) {
+            return null;
+        }
+        Object up = FeedItems.readProp(args, "upName");
+        return (up instanceof String && ((String) up).length() > 0) ? (String) up : null;
+    }
+
     private void applyCleanCard(List<?> items) {
         int stripped = 0;
         int rowKept = 0;
         int rowDropped = 0;
+        int descFilled = 0;
         for (int i = 0; i < items.size(); i++) {
             Object item = items.get(i);
             if (item == null) {
@@ -419,6 +430,21 @@ public final class FeedCleanHooks {
                     if (FeedItems.writeJson(tag, "text", "")) {
                         for (String paint : REASON_CONTENT_KEYS) {
                             FeedItems.writeJson(tag, paint, null);
+                        }
+                        // 带角标的这代小卡，底部名字行读的是 {@code desc}（不是 args.up_name）：
+                        // 服务端把名字放进 args.up_name、把这一行让给角标时 desc 是空的，只清角标
+                        // 文字会让这行既无角标也无名字（实机：card「我想我已慢慢喜欢你」变空白）。
+                        // 把 up_name 回填进 desc，名字就落回不带角标的卡本来显示名字用的同一字段、
+                        // 同一槽位（对照：desc=heller菌 的卡清完角标后名字照显示）。
+                        String up = upNameOf(card);
+                        if (up != null) {
+                            Object desc = FeedItems.readJson(card, "desc");
+                            if (desc == null
+                                    || (desc instanceof String && ((String) desc).length() == 0)) {
+                                if (FeedItems.writeJson(card, "desc", up)) {
+                                    descFilled++;
+                                }
+                            }
                         }
                         touched = true;
                         rowKept++;
@@ -446,7 +472,8 @@ public final class FeedCleanHooks {
         if (cleanLogged.compareAndSet(false, true)) {
             api.info("feedclean: clean-card applied, badge cleared on " + stripped
                     + " card(s) (batch " + items.size() + "); reason row kept with name=" + rowKept
-                    + ", row dropped for no up_name=" + rowDropped);
+                    + ", row dropped for no up_name=" + rowDropped
+                    + ", desc backfilled from up_name=" + descFilled);
         }
     }
 
