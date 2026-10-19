@@ -245,7 +245,7 @@ public final class AccelProxy implements Closeable {
         CdnResolver resolver = engine.resolverFor(original, null);
         boolean head = "HEAD".equalsIgnoreCase(request.method);
         // 起播账面从这一刻开始计时：live 取的是代理此刻在管的连接数，与限流判据同一个数。
-        PieceDownloader.Startup startup = engine.downloader().newStartup(streams.get());
+        PieceDownloader.Startup startup = engine.downloader().newStartup(streams.get(), resolver);
         StreamingSink sink = new StreamingSink(out, end, rangeRequested(request), head, startup);
         BlockCache cache = openCache(original);
         long from = start;
@@ -634,19 +634,5 @@ public final class AccelProxy implements Closeable {
     /** 便于日志：当前在流连接数。 */
     public int activeStreams() {
         return streams.get();
-    }
-
-    /** 便于日志：候选节点数（证明不是「只有一条线路可用」）。 */
-    public List<String> hostsOf(String url) {
-        CdnResolver resolver = engine.resolverFor(url, null);
-        List<String> hosts = new ArrayList<String>();
-        List<String> urls = resolver.urls();
-        for (int i = 0; i < urls.size(); i++) {
-            String host = RangeCore.hostOf(urls.get(i));
-            if (!hosts.contains(host)) {
-                hosts.add(host);
-            }
-        }
-        return hosts;
     }
 }

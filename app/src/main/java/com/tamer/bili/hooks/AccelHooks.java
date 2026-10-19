@@ -194,12 +194,13 @@ public final class AccelHooks {
                 cfg.concurrency = clampInt(api.getAccelConcurrency(), 1, 64, 8);
                 cfg.mode = api.getAccelMode();
                 cfg.customHosts = splitCsv(api.getAccelCustomHosts());
+                File dir = resolveAccelDir();
                 engine = new AccelEngine(cfg, transport == null ? new HttpTransport() : transport,
                         new PieceDownloader.Logger() {
                     @Override public void log(String message) {
                         api.info("accel| " + message);
                     }
-                });
+                }, dir);
                 int port = PORT_BASE + portOffset;
                 AccelProxy p;
                 try {
@@ -208,7 +209,7 @@ public final class AccelHooks {
                     api.warn("accel: port " + port + " busy, fallback ephemeral: " + taken);
                     p = new AccelProxy(engine, 0);
                 }
-                wireCache(p);
+                wireCache(p, dir);
                 p.start();
                 proxy = p;
                 running = true;
@@ -221,14 +222,30 @@ public final class AccelHooks {
         }
     }
 
-    /** 共享块缓存：目录在宿主 files/ 下，两进程同路径；启动时按配额 LRU 清理一次。 */
-    private void wireCache(AccelProxy p) {
+    /**
+     * 加速目录（宿主 files/ 下，主进程与 :ijkservice/:download 同路径）：块缓存与不可达
+     * 节点账本共用它。拿不到就返回 null，两项各自退化成「只在内存里记」。
+     */
+    private File resolveAccelDir() {
         try {
             File dir = new File("/data/data/" + hostPkg + "/files/" + CACHE_DIR_NAME);
             if (!dir.isDirectory() && !dir.mkdirs()) {
-                api.warn("accel: cache dir unavailable, run without cache: " + dir);
-                return;
+                api.warn("accel: dir unavailable, run without cache/ledger: " + dir);
+                return null;
             }
+            return dir;
+        } catch (Throwable t) {
+            api.warn("accel: dir check failed, run without cache/ledger: " + t);
+            return null;
+        }
+    }
+
+    /** 共享块缓存：目录在宿主 files/ 下，两进程同路径；启动时按配额 LRU 清理一次。 */
+    private void wireCache(AccelProxy p, File dir) {
+        if (dir == null) {
+            return;
+        }
+        try {
             final File cacheDir = dir;
             // 共享句柄：播放器一次播放并发开好几条流，各开各的句柄时它们互相看不见
             // 对方已经下到盘上的字节，同一段被反复重下。见 BlockCache#acquire。
@@ -240,7 +257,7 @@ public final class AccelHooks {
             });
             long budget = (long) clampInt(api.getAccelCacheMb(), 64, 65536, 2048) * 1024L * 1024L;
             BlockCache.evict(cacheDir, budget);
-            api.info("accel: block cache dir=" + dir + " budget=" + budget);
+            api.info("accel: block cache dir=" + cacheDir + " budget=" + budget);
         } catch (Throwable t) {
             api.warn("accel: cache wiring failed (run without cache): " + t);
         }

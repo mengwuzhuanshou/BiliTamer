@@ -4,6 +4,8 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.ConnectException;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -437,9 +439,13 @@ public final class AccelSelfTest {
         return cfg;
     }
 
-    private static CdnResolver resolverFor(String primary, List<String> backups, final int mode,
-                                           CdnResolver.BanList bans) {
-        CdnResolver.Provider provider = new CdnResolver.Provider() {
+    private static CdnResolver.Provider providerFor(final int mode) {
+        return providerFor(mode, "net-a");
+    }
+
+    /** 网络身份是进程级的（{@link NetworkId}）：自测里它就是这串常量，换网络＝换个串。 */
+    private static CdnResolver.Provider providerFor(final int mode, final String net) {
+        return new CdnResolver.Provider() {
             @Override
             public int mode() {
                 return mode;
@@ -449,8 +455,44 @@ public final class AccelSelfTest {
             public String[] customHosts() {
                 return new String[0];
             }
+
+            @Override
+            public String networkId() {
+                return net;
+            }
         };
-        return new CdnResolver(primary, backups, provider, bans);
+    }
+
+    private static CdnResolver resolverFor(String primary, List<String> backups, final int mode,
+                                           CdnResolver.BanList bans) {
+        return new CdnResolver(primary, backups, providerFor(mode), bans);
+    }
+
+    /** 带进程级两本账（不可达账本 / 限速窗）的那条路：P2、P3 的判据都从这里进。 */
+    private static CdnResolver resolverFor(String primary, List<String> backups, int mode,
+                                           CdnResolver.BanList bans, NodeLedger ledger,
+                                           CdnThrottle throttle) {
+        return new CdnResolver(primary, backups, providerFor(mode), bans, ledger, throttle);
+    }
+
+    /** 候选表里某个节点第一次出现的位置；不在表里返回 -1。 */
+    private static int indexOfHost(List<String> urls, String host) {
+        for (int i = 0; i < urls.size(); i++) {
+            if (host.equals(RangeCore.hostOf(urls.get(i)))) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int countHosts(List<String> urls, String host) {
+        int n = 0;
+        for (int i = 0; i < urls.size(); i++) {
+            if (host.equals(RangeCore.hostOf(urls.get(i)))) {
+                n++;
+            }
+        }
+        return n;
     }
 
     // ===== 用例 =====
@@ -600,9 +642,9 @@ public final class AccelSelfTest {
         check(nodeBans.bannedHosts().isEmpty(), "配对封禁不进节点封禁表");
 
         CdnResolver.BanList dead = new CdnResolver.BanList(2);
-        dead.record(url(HOSTS[4], "12"), 0, 0);
-        dead.record(url(HOSTS[4], "12"), 0, 0);
-        check(!dead.allowsNode(url(HOSTS[4], "12")), "空响应（非 4xx）两次封节点");
+        dead.record(url(HOSTS[4], "12"), 0, 200);
+        dead.record(url(HOSTS[4], "12"), 0, 200);
+        check(!dead.allowsNode(url(HOSTS[4], "12")), "答了却零字节（非 4xx）两次封节点");
         check(dead.bannedHosts().contains(HOSTS[4]), "节点封禁可查询");
         dead.reset();
         check(dead.allowsNode(url(HOSTS[4], "12")), "reset 后解封");
@@ -611,6 +653,431 @@ public final class AccelSelfTest {
         partial.record(url(HOSTS[5], "13"), 4096, 0);
         partial.record(url(HOSTS[5], "13"), 4096, 0);
         check(partial.allowsNode(url(HOSTS[5], "13")), "拿到过字节的失败不封节点");
+
+        // 本机断网/换网/DNS 挂掉：所有在飞请求同时以「连 HTTP 响应头都没拿到」失败
+        // （httpStatus=0）。这类失败不能记到节点头上——一次抖动就同时给每个节点各记一笔，
+        // 两轮就把全部节点封死；封禁表又是全进程共享的，音频流会跟着视频流一起饿死。
+        // 真机账面：UnknownHostException 当刻已有 3 个节点 banned、req=787426 连续三条
+        // out=8192 / out=0 / out=24576，就是播放中途卡 0 KB 的形状。
+        CdnResolver.BanList blip = new CdnResolver.BanList(2);
+        for (int i = 0; i < HOSTS.length; i++) {
+            blip.record(url(HOSTS[i], "blip"), 0, 0);
+            blip.record(url(HOSTS[i], "blip"), 0, 0);
+        }
+        check(blip.bannedHosts().isEmpty(), "无响应的传输层失败不毒化任何节点："
+                + blip.bannedHosts());
+        for (int i = 0; i < HOSTS.length; i++) {
+            if (!blip.allows(url(HOSTS[i], "blip"))) {
+                check(false, "断网风暴后 " + HOSTS[i] + " 仍应可选");
+            }
+        }
+
+        // 同一个判据要在解析器入口也成立：attempt()/head() 对未收到响应的失败传的就是 status=0。
+        CdnResolver.BanList shared = new CdnResolver.BanList(2);
+        CdnResolver storm = resolverFor(url(HOSTS[6], "storm"), null, CdnResolver.MODE_MAINLAND, shared);
+        storm.failure(url(HOSTS[6], "storm"), 0);
+        storm.failure(url(HOSTS[6], "storm"), 0);
+        check(!storm.status().contains("banned"), "status=0 的失败只退避不封禁：" + storm.status());
+        storm.failure(url(HOSTS[6], "storm"), 200);
+        storm.failure(url(HOSTS[6], "storm"), 200);
+        check(storm.status().contains("banned"), "答了却零字节仍封禁：" + storm.status());
+    }
+
+    /**
+     * P1：默认档必须留住「playurl 这次授权过的原址」，并且让它排在派生地址前面。
+     *
+     * <p>真机账面（国际版 6.6.0，一次播放 183 条流）：下发的是
+     * {@code upos-sz-mirrorcosov}（41 条）+ {@code upos-hz-mirrorakam.akamaized}（12 条），
+     * 旧写法按「国内节点表」筛原址，两条全丢，只留 cosov 当母本派生 8 条大陆地址——
+     * 候选 100% 变成「拿海外签名问大陆节点」，其中三条大陆镜像在本机连 DNS 记录都没有。
+     */
+    private static void testDeliveredOriginalsStayFirst() {
+        section("默认档保留下发原址，并排在派生地址之前");
+
+        String cosov = url("upos-sz-mirrorcosov.bilivideo.com", "p1");
+        String akamai = "https://upos-hz-mirrorakam.akamaized.net/upgcxcode/80/30/97000"
+                + "/97000178_sb_p1.mp4?bvc=vod&deadline=1700000000&e=1";
+        List<String> backups = new ArrayList<String>();
+        backups.add(akamai);
+        CdnResolver resolver = resolverFor(cosov, backups, CdnResolver.MODE_MAINLAND,
+                new CdnResolver.BanList(2));
+        List<String> all = resolver.allUrls();
+        equal(all.get(0), cosov, "国内档留住下发的 cosov 原址且排第一");
+        check(all.contains(akamai), "国内档留住下发的 akamai 原址");
+        for (int i = 0; i < HOSTS.length; i++) {
+            check(indexOfHost(all, HOSTS[i]) > 0, "派生的大陆节点仍在候选里：" + HOSTS[i]);
+        }
+        equal(resolver.rangeCandidates().get(0), cosov, "第一个子块先问授权过的原址");
+
+        // 全 akamai 下发（海外账号常见）：akamai 原址此时兼作母本，也必须留在表里
+        CdnResolver akamaiOnly = resolverFor(akamai, null, CdnResolver.MODE_MAINLAND,
+                new CdnResolver.BanList(2));
+        List<String> derived = akamaiOnly.allUrls();
+        equal(derived.get(0), akamai, "akamai-only 时原址仍排第一");
+        check(derived.size() > 1, "akamai-only 仍能派生出节点（" + derived.size() + " 条）");
+
+        // 用户点名海外档时，筛法照旧：这不是默认值，是明确表达的偏好
+        CdnResolver overseas = resolverFor(url(HOSTS[0], "p1o"), null, CdnResolver.MODE_OVERSEAS,
+                new CdnResolver.BanList(2));
+        List<String> ovs = overseas.allUrls();
+        check(indexOfHost(ovs, HOSTS[0]) < 0, "海外档仍按点名丢弃国内原址");
+        check(indexOfHost(ovs, "upos-sz-mirrorcosov.bilivideo.com") >= 0, "海外档展开海外节点");
+    }
+
+    /**
+     * P2：本机连不上的节点跨会话记账，但这条账只许改排序、不许删候选。
+     *
+     * <p>判据来自那 19 条 {@code out=0 disk=0 net=0}：mirrorbos/mirrorcos 在本机没有 DNS 记录、
+     * mirrorhw 拒绝连接，退避不记账，于是每次起播都重新撞一遍，首字节 max 被拖到 2962 ms。
+     */
+    private static void testUnreachableLedger() throws Exception {
+        section("不可达账本：两次链路侧失败才降级，只降级不删候选");
+
+        java.io.File dir = cacheDir("ledger");
+        NodeLedger ledger = new NodeLedger(dir, null);
+        String primary = url(HOSTS[0], "p2");
+        List<String> backups = new ArrayList<String>();
+        backups.add(url(HOSTS[1], "p2"));
+        CdnResolver resolver = resolverFor(primary, backups, CdnResolver.MODE_MAINLAND,
+                new CdnResolver.BanList(2), ledger, null);
+        String fp = resolver.fingerprint();
+        check(!fp.isEmpty(), "网络身份取自进程，不取自这次下发的地址");
+        // 真机踩过的坑：在线改写锚点只拿得到一条 base_url，按下发 host 算指纹时
+        // 母本 cosov 的视频流和母本 akamai 的音频流各算出一把指纹，两本账互看不见。
+        CdnResolver otherStream = resolverFor(url(HOSTS[4], "p2"), null, CdnResolver.MODE_MAINLAND,
+                new CdnResolver.BanList(2), ledger, null);
+        equal(otherStream.fingerprint(), fp, "同一次播放里不同母本的流共用一把网络身份");
+        int bosAt = indexOfHost(resolver.allUrls(), HOSTS[2]);
+        check(bosAt >= 0, HOSTS[2] + " 本就在派生候选里");
+
+        resolver.failure(url(HOSTS[2], "p2"), 0, new UnknownHostException("临时解析失败"));
+        check(!ledger.penalized(fp, HOSTS[2]), "一次连不上只当抖动，不降级");
+        equal(indexOfHost(resolver.allUrls(), HOSTS[2]), bosAt, "未降级时候选顺序不动");
+
+        resolver.failure(url(HOSTS[2], "p2x"), 0, new UnknownHostException("还是没有记录"));
+        check(ledger.penalized(fp, HOSTS[2]), "攒够两次连不上才降级");
+        equal(ledger.penalizedCount(fp), 1, "账面只数当前网络里被降级的节点");
+        List<String> after = resolver.allUrls();
+        check(indexOfHost(after, HOSTS[2]) > bosAt, "降级只挪到队尾");
+        equal(countHosts(after, HOSTS[2]), 1, "降级不许删候选：该节点仍有一条地址");
+        check(resolver.status().contains("unreachable"), "账面看得见降级：" + resolver.status());
+
+        // 成因必须分得开：慢、被拒、掉过线之后都拿不到「这台机器连不上它」这个结论
+        resolver.failurePartial(url(HOSTS[3], "p2t"), 0L, new java.net.SocketTimeoutException("读超时"));
+        check(!ledger.penalized(fp, HOSTS[3]), "一次叫不应只当它此刻忙（空转另记一本账）");
+        resolver.failure(url(HOSTS[4], "p2r"), 403, new UnknownHostException("干扰项"));
+        check(!ledger.penalized(fp, HOSTS[4]), "节点答了 403 记的是封禁账，不是不可达账");
+        resolver.failurePartial(url(HOSTS[5], "p2d"), 4096L, new ConnectException("中途被重置"));
+        check(!ledger.penalized(fp, HOSTS[5]), "交付过字节之后掉线不记连不上");
+
+        // 销账：节点真的吐出过字节
+        resolver.success(url(HOSTS[2], "p2"), 1024.0D);
+        check(!ledger.penalized(fp, HOSTS[2]), "交付过字节就销账");
+        equal(indexOfHost(resolver.allUrls(), HOSTS[2]), bosAt, "销账后排序回到原位");
+        check(!resolver.status().contains("unreachable"), "销账后账面不再标 unreachable");
+
+        // 换网络（下发 host 家族变了）：旧账自然失效，不需要谁去清表
+        ledger.noteUnreachable(fp, HOSTS[2]);
+        ledger.noteUnreachable(fp, HOSTS[2]);
+        check(ledger.penalized(fp, HOSTS[2]), "同网络里再次降级");
+        String otherNet = "net-b";
+        check(!otherNet.equals(fp) && !otherNet.isEmpty(), "换网络后身份不同");
+        check(!ledger.penalized(otherNet, HOSTS[2]), "换网络不误伤：旧网络的账不跟过来");
+
+        // 跨进程：:ijkservice 记下的降级，主进程下次起播就该看得见；恢复也一样要活过进程
+        NodeLedger secondProcess = new NodeLedger(dir, null);
+        check(secondProcess.penalized(fp, HOSTS[2]), "降级这笔活过了进程：新实例读得到盘上的账");
+        ledger.noteSuccess(fp, HOSTS[2]);
+        check(!new NodeLedger(dir, null).penalized(fp, HOSTS[2]), "销账也活过了进程，不是只留在内存");
+
+        // 没有账的时候一切照旧：ledger 传 null 的解析器不排序、不报错（旧用例走的就是这条路）
+        CdnResolver withoutLedger = resolverFor(primary, backups, CdnResolver.MODE_MAINLAND,
+                new CdnResolver.BanList(2));
+        equal(indexOfHost(withoutLedger.allUrls(), HOSTS[2]), bosAt, "无账本时候选按原顺序");
+        deleteTree(dir);
+    }
+
+    /**
+     * 第二种降级信号：连上了却叫不应（首字节超时）。判据来自真机一轮正常播放里那 3 次
+     * mirrorali 的 {@code SocketTimeoutException}——一次都不该被当成「这台机器连不上它」，
+     * 但连续三次还不理人，起播就不该再把它摆在第一位。门槛因此比不可达多一笔。
+     */
+    private static void testIdleSpinDemotion() throws Exception {
+        section("空转降级：叫不应三次才降级，记的是另一本账");
+
+        java.io.File dir = cacheDir("spin");
+        NodeLedger ledger = new NodeLedger(dir, null);
+        CdnResolver resolver = resolverFor(url(HOSTS[0], "spin"), null, CdnResolver.MODE_MAINLAND,
+                new CdnResolver.BanList(2), ledger, null);
+        String fp = resolver.fingerprint();
+        String slow = HOSTS[3];
+        int at = indexOfHost(resolver.allUrls(), slow);
+        check(at >= 0, slow + " 本在候选里");
+
+        resolver.failure(url(slow, "s1"), 0, new java.net.SocketTimeoutException("connect 超时"));
+        resolver.failure(url(slow, "s1"), 0, new java.net.SocketTimeoutException("等响应头超时"));
+        check(!ledger.penalized(fp, slow), "两次叫不应只当它此刻忙，不降级");
+        equal(indexOfHost(resolver.allUrls(), slow), at, "未降级时候选顺序不动");
+
+        resolver.failure(url(slow, "s1"), 0, new java.net.SocketTimeoutException("还是不吐字节"));
+        check(ledger.penalized(fp, slow), "第三次还不理人才降级");
+        equal(ledger.penaltyTag(fp, slow), "silent", "账面分得清是被拒还是叫不应");
+        check(resolver.status().contains("silent"), "状态行印得出 silent：" + resolver.status());
+        List<String> after = resolver.allUrls();
+        check(indexOfHost(after, slow) > at, "降级只挪到队尾");
+        equal(countHosts(after, slow), 1, "空转降级同样不许删候选");
+        check(!resolver.status().contains("banned"), "叫不应不毒化封禁表：" + resolver.status());
+        check(new NodeLedger(dir, null).penalized(fp, slow), "空转降级也活过了进程");
+
+        // 两本账各记各的：混着来各一次，谁都够不上降级线
+        String mixed = HOSTS[4];
+        resolver.failure(url(mixed, "s2"), 0, new java.net.SocketTimeoutException("慢"));
+        resolver.failure(url(mixed, "s2"), 0, new UnknownHostException("查不到"));
+        check(!ledger.penalized(fp, mixed), "一次空转加一次被拒：各本账都只有一笔，不降级");
+        ledger.noteUnreachable(fp, mixed);
+        check(ledger.penalized(fp, mixed), "补上第二笔不可达账才降级");
+        equal(ledger.penaltyTag(fp, mixed), "unreachable", "被拒攒够时优先印 unreachable");
+        resolver.success(url(mixed, "s2"), 1024.0D);
+        check(!ledger.penalized(fp, mixed), "交付过字节两本账一起销");
+
+        // 416/4xx 不进这本账：节点答了状态行就说明到得了，问题在「它有没有这个文件」
+        String missing = HOSTS[5];
+        resolver.failure(url(missing, "s3"), 416, new IOException("Range 校验失败：HTTP 416"));
+        check(!ledger.penalized(fp, missing), "416 是节点答了话，不记不可达账");
+        deleteTree(dir);
+    }
+
+    /**
+     * 两个进程各写各的账：主进程与 :ijkservice 谁也不知道对方撞了几次，只靠盘上那一本。
+     * 判据来自真机账面——主进程记到 9 笔，:ijkservice 后写的一条 1 笔把它整笔顶掉，
+     * 同一个进程里于是出现两条「after 2 unreachable tries」，那本账等于被同伴清零。
+     */
+    private static void testLedgerMergeAcrossProcesses() throws Exception {
+        section("跨进程并账：接得上同伴的账，压得住同伴的销账，也不会自己乘自己");
+
+        java.io.File dir = cacheDir("merge");
+        final java.util.List<String> lines = new java.util.ArrayList<String>();
+        NodeLedger a = new NodeLedger(dir, new PieceDownloader.Logger() {
+            @Override public void log(String message) {
+                lines.add(message);
+            }
+        });
+        String fp = "net-a";
+        String host = HOSTS[2];
+        java.io.File file = new java.io.File(dir, "cdn_node_ledger.txt");
+
+        // (1) 另一进程已经记过两笔，新进程再撞一次就该接着这本账降级，而不是从头数
+        a.noteUnreachable(fp, host);
+        a.noteUnreachable(fp, host);
+        check(a.penalized(fp, host), "A 进程自己撞两次先降级");
+        NodeLedger b = new NodeLedger(dir, null);
+        b.noteUnreachable(fp, host);
+        check(b.penalized(fp, host), "B 进程只撞一次，但接上了 A 那本账——一次就够降级");
+
+        // (2) B 交付过字节、写下更晚的 0 笔墓碑：它是一次真实的成功，必须压得住旧账
+        long later = System.currentTimeMillis() + 4000L;
+        writeLedger(file, fp + " " + host + " 0 " + later + " 0 " + later + "\n");
+        b.noteUnreachable(fp, HOSTS[3]);
+        check(!b.penalized(fp, host), "更晚的成功墓碑要压得住旧账（并账不是无脑取大）");
+
+        // (3) 自己上一轮写到盘上的那行，读回来不许再算一遍，也不许把笔数并回去：
+        //     三笔账在同一个毫秒里落完是常态，所以这里连跑 20 轮，专门抓并列时的覆盖方向
+        for (int round = 0; round < 20; round++) {
+            java.io.File solo = cacheDir("merge-solo-" + round);
+            final java.util.List<String> soloLines = new java.util.ArrayList<String>();
+            NodeLedger self = new NodeLedger(solo, new PieceDownloader.Logger() {
+                @Override public void log(String message) {
+                    soloLines.add(message);
+                }
+            });
+            self.noteUnreachable(fp, HOSTS[5]);
+            self.noteUnreachable(fp, HOSTS[5]);
+            check(soloLines.size() == 1, "只在跨过降级线那一刻印一条（第 " + round + " 轮）：" + soloLines);
+            check(!soloLines.isEmpty() && soloLines.get(0).contains("after 2 unreachable tries"),
+                    "账面数的是真的两次拨号：" + soloLines);
+            self.noteUnreachable(fp, HOSTS[5]);
+            equal(soloLines.size(), 1, "第 " + round + " 轮：已经降级了就不再印一遍：" + soloLines
+                    + " || 盘上：" + readLedger(new java.io.File(solo, "cdn_node_ledger.txt"))
+                    .replace("\n", " / "));
+            check(self.penalized(fp, HOSTS[5]), "第 " + round + " 轮：并过账之后仍然降级");
+            deleteTree(solo);
+        }
+
+        // (4) 第 5、6 段是后加的（空转笔数与它的时刻）：旧格式四段必须照样读得进来
+        writeLedger(file, fp + " " + HOSTS[6] + " 7 " + (System.currentTimeMillis() + 3000L) + "\n");
+        NodeLedger upgraded = new NodeLedger(dir, null);
+        check(upgraded.penalized(fp, HOSTS[6]), "旧格式四段的账没有被当读坏丢掉");
+        upgraded.noteUnreachable(fp, HOSTS[7]);
+        upgraded.noteUnreachable(fp, HOSTS[7]);
+        String[] written = readLedger(file).split("\n");
+        int rows = 0;
+        for (int i = 0; i < written.length; i++) {
+            if (written[i].isEmpty()) {
+                continue;
+            }
+            rows++;
+            equal(written[i].split(" ").length, 6, "落盘的每一行都带上两本账各自的时刻：" + written[i]);
+        }
+        check(rows > 0, "落盘的账不为空");
+        deleteTree(dir);
+    }
+
+    private static void writeLedger(java.io.File file, String text) throws IOException {
+        java.io.FileOutputStream out = new java.io.FileOutputStream(file);
+        try {
+            out.write(text.getBytes("US-ASCII"));
+        } finally {
+            out.close();
+        }
+    }
+
+    private static String readLedger(java.io.File file) throws IOException {
+        java.io.BufferedReader in = new java.io.BufferedReader(
+                new java.io.InputStreamReader(new java.io.FileInputStream(file), "US-ASCII"));
+        try {
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = in.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+            return sb.toString();
+        } finally {
+            in.close();
+        }
+    }
+
+    /**
+     * P3：412/429 是节点在说「问得太凶」，责任在这台机器的总速率而不在某条地址，
+     * 所以降的是全局并发——只降并发，不关加速。
+     */
+    private static void testLimitedWindowDropsToConnection(byte[] file) throws Exception {
+        section("限速信号：412/429 之后每条流只走一条连接");
+
+        FakeCdn control = new FakeCdn(file.length);
+        CdnResolver plain = resolverFor(url(HOSTS[0], "lmc"), null, CdnResolver.MODE_MAINLAND,
+                new CdnResolver.BanList(2));
+        PieceDownloader normal = new PieceDownloader(control.transport(), testConfig());
+        Recorder recA = new Recorder(file);
+        normal.stream(plain, null, 0L, -1L, recA, new CancelToken());
+        normal.shutdown();
+        equal(recA.bytes, (long) file.length, "对照组全量交付");
+        check(control.maxInFlight > 1, "对照组确有并发（峰值 " + control.maxInFlight + "）");
+
+        CdnThrottle throttle = new CdnThrottle(null);
+        check(!throttle.limited(), "没有信号时不降速");
+        throttle.noteLimited(403);
+        check(!throttle.limited(), "403 是被拒，不是限速信号");
+        throttle.noteLimited(500);
+        check(!throttle.limited(), "5xx 是节点坏了，不是限速信号");
+        throttle.noteLimited(412);
+        check(throttle.limited(), "412 进入降速期");
+        equal(throttle.reason(), "HTTP 412", "降速期写下原因");
+
+        FakeCdn limited = new FakeCdn(file.length);
+        CdnResolver resolver = resolverFor(url(HOSTS[0], "lm"), null, CdnResolver.MODE_MAINLAND,
+                new CdnResolver.BanList(2), null, throttle);
+        equal(resolver.status().contains("limited="), true, "降速期写进状态行：" + resolver.status());
+        PieceDownloader downloader = new PieceDownloader(limited.transport(), testConfig(), throttle);
+        Recorder rec = new Recorder(file);
+        long startedAt = System.currentTimeMillis();
+        downloader.stream(resolver, null, 0L, -1L, rec, new CancelToken());
+        long elapsed = System.currentTimeMillis() - startedAt;
+        downloader.shutdown();
+        equal(rec.bytes, (long) file.length, "降速期照样全量交付");
+        check(rec.covers(0, file.length - 1), "降速期覆盖连续");
+        equal(limited.maxInFlight, 1, "降速期一条流最多一条连接在飞（峰值 "
+                + limited.maxInFlight + "）");
+        check(elapsed < 20000L, "降速期耗时可控：" + elapsed + "ms");
+
+        // 窗口得自己过期：真机不能因为一次 429 就永远只走一条连接
+        java.lang.reflect.Field until = CdnThrottle.class.getDeclaredField("untilMs");
+        until.setAccessible(true);
+        until.setLong(throttle, System.currentTimeMillis() + 40L);
+        check(throttle.limited(), "过期前仍在降速");
+        Thread.sleep(90L);
+        check(!throttle.limited(), "降速窗自己过期，不用谁去清");
+
+        // 降速期不许顺手把节点打死：429 的责任在总速率，封禁表不该被它毒化
+        check(!resolver.status().contains("banned"), "限速不封节点：" + resolver.status());
+    }
+
+    /**
+     * 引擎这一层必须真的把「成因」传到账本上：{@code PieceDownloader} 若把异常吞了、
+     * 给 {@code CdnResolver.failure} 传 null，上面那条账本单测照样全绿，设备上却等于没做。
+     * 所以这里从 Transport 抛真异常进去，只看盘上有没有长出账。
+     */
+    private static void testEngineRecordsCauseFromTransport(byte[] file) throws Exception {
+        section("引擎把传输层成因记进账本：从 Transport 抛异常到盘上有账");
+
+        java.io.File dir = cacheDir("engine-ledger");
+        final FakeCdn cdn = new FakeCdn(file.length);
+        final Transport inner = cdn.transport();
+        final java.util.concurrent.atomic.AtomicInteger deadOpens =
+                new java.util.concurrent.atomic.AtomicInteger();
+        // 撞死的是「下发的原址」这个节点：真机基线里 mirrorhw 就是这个形状（连接被拒），
+        // 而它排在候选最前面，起播第一口必然撞上去。
+        Transport dnsDead = new Transport() {
+            @Override
+            public Transport.Response open(String url, long start, long end, Map<String, String> headers,
+                                           int connectTimeoutMs, int readTimeoutMs) throws IOException {
+                if (HOSTS[0].equals(RangeCore.hostOf(url)) && deadOpens.incrementAndGet() <= 4) {
+                    throw new UnknownHostException(HOSTS[0]);
+                }
+                return inner.open(url, start, end, headers, connectTimeoutMs, readTimeoutMs);
+            }
+        };
+        AccelEngine engine = new AccelEngine(testConfig(), dnsDead, null, dir);
+        Recorder recA = new Recorder(file);
+        // 两个不同文件地址（视频流 + 另一份文件）：真机一次播放就是这个形状，
+        // 它们的退避表各自独立，但账本与指纹是共享的，所以两笔账能在十分钟里攒够两次。
+        CdnResolver r1 = engine.resolverFor(url(HOSTS[0], "eng1"), null);
+        engine.downloader().stream(r1, null, 0L, -1L, recA, new CancelToken());
+        Recorder recB = new Recorder(file);
+        CdnResolver r2 = engine.resolverFor(url(HOSTS[0], "eng2"), null);
+        engine.downloader().stream(r2, null, 0L, -1L, recB, new CancelToken());
+        engine.downloader().shutdown();
+
+        equal(recA.bytes, (long) file.length, "第一份文件全量交付");
+        equal(recB.bytes, (long) file.length, "第二份文件全量交付");
+        check(deadOpens.get() >= 2, "取数过程确实撞到过解析不到的节点（" + deadOpens.get() + " 次）");
+        java.io.File[] born = dir.listFiles();
+        boolean ledgerFile = false;
+        if (born != null) {
+            for (int i = 0; i < born.length; i++) {
+                if (born[i].isFile()) {
+                    ledgerFile = true;
+                }
+            }
+        }
+        check(ledgerFile, "账本落到了引擎的目录里");
+        String fp = r1.fingerprint();
+        check(new NodeLedger(dir, null).penalized(fp, HOSTS[0]),
+                "从 Transport 抛出的 UnknownHostException 变成了盘上的降级账");
+        check(!new NodeLedger(dir, null).penalized(fp, HOSTS[3]), "有账的只有连不上的那个节点");
+        check(indexOfHost(r1.allUrls(), HOSTS[3]) < indexOfHost(r1.allUrls(), HOSTS[0]),
+                "降级后连不上的节点排到了队尾");
+        deleteTree(dir);
+    }
+
+    /**
+     * 播放器每重连一次就把整套 query 重签一遍（真机核对过，参数顺序还随机打乱）。
+     * 解析器必须留住——健康度、退避、封禁计时都挂在它身上；但拨号用的地址要换成新的，
+     * 留着旧签名等于拿过期的 deadline/upsig 去问节点，那是必然 403。
+     */
+    private static void testResignReusesResolverButSwapsSignature() throws Exception {
+        section("重签地址：解析器复用，签名换成新的");
+
+        AccelEngine engine = new AccelEngine(testConfig(), new FakeCdn(1024).transport(), null, null);
+        String signed = "https://" + HOSTS[0]
+                + "/upgcxcode/80/30/97000/97000178_sb_rs.m4s?deadline=1&upsig=aa";
+        String reSigned = "https://" + HOSTS[0]
+                + "/upgcxcode/80/30/97000/97000178_sb_rs.m4s?upsig=bb&deadline=2";
+        CdnResolver first = engine.resolverFor(signed, null);
+        CdnResolver again = engine.resolverFor(reSigned, null);
+        check(first == again, "同一份文件重签之后还是同一个解析器");
+        equal(again.originals().get(0), reSigned, "拨号用的是刚下发的签名");
+        check(engine.resolverFor(url(HOSTS[0], "rs2"), null) != again,
+                "换文件（换清晰度）另起一个解析器，两档码率不记一本账");
     }
 
     private static void testHappyPath(FakeCdn cdn, byte[] file) {
@@ -2100,6 +2567,13 @@ public final class AccelSelfTest {
         testRangeCore();
         testResolver();
         testBanAttribution();
+        testDeliveredOriginalsStayFirst();
+        testUnreachableLedger();
+        testIdleSpinDemotion();
+        testLedgerMergeAcrossProcesses();
+        testLimitedWindowDropsToConnection(file);
+        testEngineRecordsCauseFromTransport(file);
+        testResignReusesResolverButSwapsSignature();
         testHappyPath(cdn, file);
         testSlowNode(file);
         testRefusedAndDropped(cdn, file);

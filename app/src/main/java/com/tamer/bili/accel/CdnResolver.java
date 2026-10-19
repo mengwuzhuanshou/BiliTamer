@@ -1,5 +1,8 @@
 package com.tamer.bili.accel;
 
+import java.io.IOException;
+import java.net.ConnectException;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -12,7 +15,8 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 多 CDN 节点选择：候选地址展开、节点健康度（bps 指数平均 + 失败退避）、封禁表。
+ * 多 CDN 节点选择：候选地址展开、节点健康度（bps 指数平均 + 失败退避）、封禁表、
+ * 跨会话的不可达账本与服务端限速信号。
  * 移植自参考实现 Bilibili-thread-ripper 的 src/cdn-resolver.js。
  *
  * <p>关键前提（国际版 6.5.0 静态复核结论）：官方离线缓存走 SingleSpec，一个流只有一条连接；
@@ -50,6 +54,9 @@ public final class CdnResolver {
 
         /** 自定义模式的节点列表（已 normalize）；空表示未配置。 */
         String[] customHosts();
+
+        /** 本机当前网络身份（不可达账本的键），与稿件、码率、流类型都无关。 */
+        String networkId();
     }
 
     /** 一条地址的观测健康度。 */
@@ -100,6 +107,14 @@ public final class CdnResolver {
         /** 记录一次空响应；返回是否产生了新封禁。 */
         public synchronized boolean record(String url, long receivedBytes, int httpStatus) {
             if (receivedBytes > 0) {
+                return false;
+            }
+            // httpStatus==0 意味着连 HTTP 响应头都没拿到：DNS 失败、连接被拒、握手后立刻
+            // reset。这类失败的成因在本机链路，不在节点——一次断网/换网会同时打断所有在飞
+            // 请求，于是每个节点各记一笔，两轮就把全部节点封死（真机账面：
+            // UnknownHostException 当刻 3 个节点已 banned、随后 7/8 banned），而这张表又是
+            // 全进程共享的，音频流跟着视频流一起没节点可用。退避照常，记账免谈。
+            if (httpStatus <= 0) {
                 return false;
             }
             String host = RangeCore.hostOf(url);
@@ -232,21 +247,35 @@ public final class CdnResolver {
         }
     }
 
-    private final String primary;
+    /** 用来拨号的那份签名地址：播放器每重连一次就换一套 query，见 {@link #resignKey}。 */
+    private volatile String primary;
     private final List<String> backups;
     private final Provider provider;
     private final BanList bans;
+    private final NodeLedger ledger;
+    private final CdnThrottle throttle;
     private final Map<String, Health> health = new LinkedHashMap<String, Health>();
     private int cursor;
     private int mediaRangeCount;
     private int rangeCursor;
 
     public CdnResolver(String primaryUrl, List<String> backupUrls, Provider provider, BanList bans) {
+        this(primaryUrl, backupUrls, provider, bans, null, null);
+    }
+
+    /**
+     * ledger/throttle 是进程级共享的（按地址缓存的解析器很多个，账只有一本）；传 null 即
+     * 「只用退避和封禁表」，桌面自测与降级路径都走这一条。
+     */
+    public CdnResolver(String primaryUrl, List<String> backupUrls, Provider provider, BanList bans,
+                       NodeLedger ledger, CdnThrottle throttle) {
         this.primary = primaryUrl;
         this.backups = new ArrayList<String>();
         addBackups(backupUrls);
         this.provider = provider;
         this.bans = bans == null ? new BanList(2) : bans;
+        this.ledger = ledger;
+        this.throttle = throttle;
     }
 
     /** 后续拿到更多下发地址（playurl 的 backupUrl / 重试地址）时并入，不丢已有健康度。 */
@@ -259,6 +288,22 @@ public final class CdnResolver {
             if (url != null && RangeCore.isMediaUrl(url) && !url.equals(primary) && !backups.contains(url)) {
                 backups.add(url);
             }
+        }
+    }
+
+    /**
+     * 播放器每重连一次就把整套 query 重签一遍（路径不变）：这条流还是同一条流，
+     * 健康度、退避、账本都得留着，只把用来拨号的签名换成新的。
+     *
+     * <p>不换就等于拿过期的 deadline/upsig 去问节点——那是必然 403，比重新建一个解析器更糟。
+     */
+    public synchronized void resignKey(String url) {
+        if (url == null || url.equals(primary)) {
+            return;
+        }
+        String next = RangeCore.fileKeyOf(url);
+        if (!next.isEmpty() && next.equals(RangeCore.fileKeyOf(primary))) {
+            primary = url;
         }
     }
 
@@ -278,6 +323,28 @@ public final class CdnResolver {
         }
     }
 
+    /**
+     * 记账用的网络身份：整个进程一把，与稿件、码率、流类型无关（见 {@link NetworkId}）。
+     *
+     * <p>这里曾经是 {@code NodeLedger.fingerprint(originals())}——拿本次下发 host 集合做哈希。
+     * 那个口径在线上是假的：改写锚点只返回一条 base_url，backups 恒空，于是「网络指纹」退化成
+     * 「这条流母本域名的哈希」，同一次播放里视频流和音频流各记一本账，降级互相看不见。
+     */
+    public String fingerprint() {
+        return provider == null ? "" : provider.networkId();
+    }
+
+    /**
+     * 本网络里已被账本判死的节点数，取证用的一个读数。
+     * 与降级判定同源（同一本账、同一个指纹），所以它不为 0 而候选照旧选中该节点，
+     * 就说明降级没生效——这正是「投毒验证」要看的那一眼。
+     */
+    public synchronized int demotedCount() {
+        NodeLedger l = ledger;
+        String fp = fingerprint();
+        return l == null || fp.isEmpty() ? 0 : l.penalizedCount(fp);
+    }
+
     private String[] hostsFor(int mode, String[] custom) {
         if (mode == MODE_CUSTOM && custom.length > 0) {
             return custom;
@@ -289,6 +356,13 @@ public final class CdnResolver {
      * 展开全部可用地址：先保留模式允许的下发原址，再补上「同一签名换节点」的合成地址。
      * 只有下发全是 akamaized 时才允许拿 akamai 地址当 donor，否则 akamai 一律不派生
      * （其它节点不认 akamai 的签名）。节点优先展开，首批请求天然分散在不同节点上。
+     *
+     * <p>国内档（默认）不过滤原址的 host 家族：真机取证过一次播放下发
+     * {@code upos-sz-mirrorcosov}（41 条）+{@code upos-hz-mirrorakam.akamaized}（12 条），
+     * 旧写法按「国内节点表」筛原址，两条全被丢弃，只留 cosov 当母本派生 8 个大陆地址——
+     * 候选 100% 变成「海外签名问大陆节点」，其中三个大陆镜像在本机根本没有 DNS 记录。
+     * 官方下发的地址是这次网络里唯一被服务端认可过的入口，任何模式都不该把它扔掉；
+     * 海外/自定义档仍然按用户点名筛（那是明确表达的偏好，不是默认值）。
      */
     public List<String> allUrls() {
         int mode = provider == null ? MODE_MAINLAND : provider.mode();
@@ -305,7 +379,7 @@ public final class CdnResolver {
             } else if (mode == MODE_OVERSEAS) {
                 allowed = !containsHost(MAINLAND_HOSTS, host);
             } else {
-                allowed = containsHost(MAINLAND_HOSTS, host);
+                allowed = true;
             }
             if (allowed && !out.contains(url)) {
                 out.add(url);
@@ -335,7 +409,37 @@ public final class CdnResolver {
                 }
             }
         }
-        return out;
+        return downgradeUnreachable(out);
+    }
+
+    /**
+     * 把本机已证实连不上的节点降到队尾（不删：全被降级时它们照样是候选）。
+     * 排在前面的是「这次下发授权过的地址」，其次才是派生地址，稳定排序因此天然成立。
+     */
+    private List<String> downgradeUnreachable(List<String> urls) {
+        NodeLedger l = ledger;
+        if (l == null || urls.size() < 2) {
+            return urls;
+        }
+        String fp = fingerprint();
+        if (fp.isEmpty()) {
+            return urls;
+        }
+        List<String> reachable = new ArrayList<String>(urls.size());
+        List<String> unreachable = new ArrayList<String>();
+        for (int i = 0; i < urls.size(); i++) {
+            String url = urls.get(i);
+            if (l.penalized(fp, RangeCore.hostOf(url))) {
+                unreachable.add(url);
+            } else {
+                reachable.add(url);
+            }
+        }
+        if (unreachable.isEmpty()) {
+            return urls;
+        }
+        reachable.addAll(unreachable);
+        return reachable;
     }
 
     private static boolean contains(String[] hosts, String host) {
@@ -429,7 +533,7 @@ public final class CdnResolver {
     public synchronized List<String> startupCandidates() {
         long now = System.currentTimeMillis();
         LinkedHashSet<String> merged = new LinkedHashSet<String>();
-        merged.addAll(originals());
+        merged.addAll(downgradeUnreachable(originals()));
         merged.addAll(allUrls());
         List<String> out = new ArrayList<String>();
         Iterator<String> it = merged.iterator();
@@ -481,6 +585,10 @@ public final class CdnResolver {
 
     public synchronized void success(String url, double bps) {
         bans.success(url);
+        NodeLedger l = ledger;
+        if (l != null) {
+            l.noteSuccess(fingerprint(), RangeCore.hostOf(url));
+        }
         Health h = health.get(url);
         if (h == null) {
             h = new Health();
@@ -494,8 +602,59 @@ public final class CdnResolver {
 
     /** 失败退避：3s 起指数翻倍，最多 60s；拿到过字节的失败同样计入（与参考实现一致）。 */
     public synchronized void failure(String url, int httpStatus) {
+        failure(url, httpStatus, null);
+    }
+
+    /**
+     * 失败退避 + 两张共享账。cause 必须如实传：只有「没拿到 HTTP 状态、也没拿到字节」的失败
+     * 才可能进不可达账本，而且按成因分两种账（见 {@link #noteZeroByte}）；
+     * 慢、被 4xx 拒、交付过一半都不是节点连不上的证据。
+     */
+    public synchronized void failure(String url, int httpStatus, IOException cause) {
         bans.record(url, 0L, httpStatus);
+        CdnThrottle t = throttle;
+        if (t != null) {
+            t.noteLimited(httpStatus);
+        }
+        if (httpStatus <= 0) {
+            noteZeroByte(url, cause);
+        }
         applyBackoff(url);
+    }
+
+    /**
+     * 播放器已经挂断（换清晰度、seek、流被砍尾）时的那一笔：只记不可达账，不碰封禁表也不退避。
+     *
+     * <p>为什么挂断了还要记：「这台机器叫不应它」是链路的性质，不是这一条流的性质——
+     * 播放器掐不掐断都不影响它叫不应。真机投毒实测：五条被拒的 SYN 里只有两条记进了账，
+     * 另外三条正好对上三条播放器挂断（{@code Broken pipe}），于是每次起播都要重新撞一遍
+     * 同一个死节点，账本等于没写。
+     */
+    public synchronized void noteZeroByteFailure(String url, IOException cause) {
+        noteZeroByte(url, cause);
+    }
+
+    /**
+     * 一笔「零字节 + 没有 HTTP 状态」的失败，按成因分开记账：
+     * DNS 查不到、连接被拒记成不可达（{@code strikes}）；连上了却在首字节超时内叫不应记成空转
+     * （{@code spins}），后者证据弱一档、门槛也高一档。两类之外的成因（SSL、协议错、我们自己的
+     * 「已取消」）一笔都不记——那是这一条流的事，不是这台网络的性质。
+     *
+     * <p>416/4xx 不在这里：节点答了状态码就说明它到得了，问题在「这个节点有没有这个文件」，
+     * 那是（节点, 地址）二元的事，归封禁表的责任区分管，账本只有节点维度，记进去会毒化整个节点。
+     */
+    private void noteZeroByte(String url, IOException cause) {
+        NodeLedger l = ledger;
+        String fp = l == null ? "" : fingerprint();
+        if (l == null || fp.isEmpty()) {
+            return;
+        }
+        String host = RangeCore.hostOf(url);
+        if (isLinkDead(cause)) {
+            l.noteUnreachable(fp, host);
+        } else if (isSilent(cause)) {
+            l.noteIdleSpin(fp, host);
+        }
     }
 
     /**
@@ -504,8 +663,44 @@ public final class CdnResolver {
      * 交付过数据的节点当空响应处理，两次就封；真机换连接风暴里镜像就是这样被打封的。
      */
     public synchronized void failurePartial(String url, long receivedBytes) {
+        failurePartial(url, receivedBytes, null);
+    }
+
+    /** 同上，带上真实成因：一个字节都没拿到时，才按成因决定记哪种不可达账。 */
+    public synchronized void failurePartial(String url, long receivedBytes, IOException cause) {
         bans.record(url, receivedBytes, 0);
+        if (receivedBytes <= 0L) {
+            noteZeroByte(url, cause);
+        }
         applyBackoff(url);
+    }
+
+    /** 连 HTTP 响应头都没有，且成因是解析不到名字或被拒——这是本机链路的形状，不是节点行为的形状。 */
+    private static boolean isLinkDead(IOException cause) {
+        return causedBy(cause, true);
+    }
+
+    /**
+     * 连上了、在首字节超时内一个字节都没给、也没给状态行：形状是「叫不应」。
+     * {@code firstByteTimeoutMs} 同时是 connect 超时与等响应头的读超时，取连接前的排队不计进来
+     * （{@code PieceDownloader} 三处都是先拿许可再拨号），所以这一笔确实是节点/链路没答应。
+     */
+    private static boolean isSilent(IOException cause) {
+        return causedBy(cause, false);
+    }
+
+    private static boolean causedBy(IOException cause, boolean wantLinkDead) {
+        Throwable t = cause;
+        for (int depth = 0; t != null && depth < 4; depth++) {
+            boolean hit = wantLinkDead
+                    ? (t instanceof UnknownHostException || t instanceof ConnectException)
+                    : t instanceof java.net.SocketTimeoutException;
+            if (hit) {
+                return true;
+            }
+            t = t.getCause() == t ? null : t.getCause();
+        }
+        return false;
     }
 
     private void applyBackoff(String url) {
@@ -527,6 +722,8 @@ public final class CdnResolver {
     /** 供日志/面板用的一行状态。 */
     public synchronized String status() {
         List<String> all = allUrls();
+        NodeLedger l = ledger;
+        String fp = l == null ? "" : fingerprint();
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < all.size(); i++) {
             String url = all.get(i);
@@ -535,18 +732,31 @@ public final class CdnResolver {
                 sb.append(", ");
             }
             sb.append(RangeCore.hostOf(url)).append('[');
+            // 不可达是本机网络层面的事实，和退避/封禁不是一回事，得独立印出来：
+            // 真机上「blocked」既可能是「这条地址刚才慢」也可能是「本机根本连不上它」，
+            // 混在一个标签里就看不出该不该换网络了。
+            // unreachable（被拒/查不到）与 silent（叫不应）也要分开：前者该换网络，后者可能只是它此刻忙。
+            String penalty = l == null ? null : l.penaltyTag(fp, RangeCore.hostOf(url));
+            String tag;
             if (!bans.allowsNode(url)) {
-                sb.append("banned");
+                tag = "banned";
             } else if (h != null && h.blockedUntil > System.currentTimeMillis()) {
-                sb.append("blocked");
+                tag = "blocked";
             } else if (h != null && h.lastSuccessAt > 0L) {
                 // PieceDownloader.bps() 给的是 KiB/s，按 MB/s 印出来要先除一次 1024。
-                sb.append("healthy ");
-                sb.append(Math.round(h.bps / 102.4D) / 10.0D).append("MB/s");
+                tag = "healthy " + (Math.round(h.bps / 102.4D) / 10.0D) + "MB/s";
             } else {
-                sb.append("untested");
+                tag = penalty == null ? "untested" : penalty;
+            }
+            sb.append(tag);
+            if (penalty != null && !penalty.equals(tag)) {
+                sb.append(' ').append(penalty);
             }
             sb.append(']');
+        }
+        CdnThrottle t = throttle;
+        if (t != null && t.limited()) {
+            sb.append(" limited=").append(t.reason());
         }
         return sb.toString();
     }

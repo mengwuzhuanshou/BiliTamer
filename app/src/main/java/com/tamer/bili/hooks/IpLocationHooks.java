@@ -358,13 +358,15 @@ public final class IpLocationHooks {
             }
             String pkg = g == null ? null : strField(g, "a");
             rememberService(svc, pkg);
-            // 评论区限定：评论区 + 空间页 + 主页（各按服务名/包名识别，不做全局声明）
-            boolean want = ip && (isReplyService(svc) || isSpaceService(svc, pkg) || isHomeService(svc, pkg));
+            // 限定档覆盖面：评论区 + 空间页 + 主页 + 稿件详情/取流
+            // （各按服务名或包名识别，不做全局声明）
+            boolean want = ip && (isReplyService(svc) || isSpaceService(svc, pkg)
+                    || isHomeService(svc, pkg) || isViewService(svc, pkg));
             if (!want) return null;
             if (api.isVerboseLoggingEnabled()) {
                 api.info("ip: scoped rewrite armed svc=" + svc + " method=" + method);
             } else {
-                logRewrite(probeCommon, "common-headers 评论区限定改写待生效: " + svc);
+                logRewrite(probeCommon, "限定改写待生效: " + svc + " pkg=" + pkg);
             }
             return svc;
         } catch (Throwable t) {
@@ -530,6 +532,23 @@ public final class IpLocationHooks {
         String p = pkg == null ? null : pkg.toLowerCase();
         if (s != null && (s.startsWith("bilibili.app.interfaces") || s.contains("pegasus"))) return true;
         return p != null && (p.contains("bilibili.app.interfaces") || p.contains("pegasus"));
+    }
+
+    /** 稿件详情 + 取流服务判定（6.6.0 设备实证：打开详情页发 svc=View pkg=bilibili.app.viewunite.v1，
+     *  取播放信息发 svc=Player pkg=bilibili.app.playerunite.v1）。
+     *  这两族的描述符字段填法与评论区相反——短名在 b、全名在 a（评论区是全名在 b），所以判定必须
+     *  同时认 pkg，只比 svc 会恒不命中。app.view.v1 / app.playurl.v1 是非 unite 的老形态，一并认。
+     *  为什么要武装它：国际版服务端按 mobi_app 裁剪稿件可见性，限定档下这类稿件直接「视频不见了哦」，
+     *  而全局档同一 BV 能播——本判定就是把那份收益定域到取稿件这一处。 */
+    private static boolean isViewService(String svc, String pkg) {
+        String p = pkg == null ? null : pkg.toLowerCase();
+        if (p != null && (p.startsWith("bilibili.app.view") || p.startsWith("bilibili.app.playurl")
+                || p.startsWith("bilibili.app.playerunite"))) {
+            return true;
+        }
+        String s = svc == null ? null : svc.toLowerCase();
+        return s != null && (s.startsWith("bilibili.app.view") || s.startsWith("bilibili.app.playurl")
+                || s.startsWith("bilibili.app.playerunite"));
     }
 
     private void retry(Runnable r) {

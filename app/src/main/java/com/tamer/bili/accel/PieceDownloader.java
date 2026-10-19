@@ -98,6 +98,9 @@ public final class PieceDownloader {
 
     /** 与 AccelEngine 共享的活动配置对象（读参数一律走 snap()，改并发即刻生效）。 */
     private final AccelConfig cfg;
+
+    /** 服务端限速信号（412/429）：降速期内每条流只用一条连接，见 {@link CdnThrottle}。 */
+    private final CdnThrottle throttle;
     private final PrioritySemaphore gate;
     private final ExecutorService pool;
 
@@ -116,8 +119,14 @@ public final class PieceDownloader {
     private volatile Logger logger;
 
     public PieceDownloader(Transport transport, AccelConfig sharedConfig) {
+        this(transport, sharedConfig, null);
+    }
+
+    /** throttle=null 表示不理会限速信号（桌面自测的默认路径）。 */
+    public PieceDownloader(Transport transport, AccelConfig sharedConfig, CdnThrottle throttle) {
         this.transport = transport;
         this.cfg = sharedConfig;
+        this.throttle = throttle;
         this.gate = new PrioritySemaphore(sharedConfig.concurrency);
         int slots = Math.max(2, Math.min(sharedConfig.concurrency, 16));
         this.windowSlots = slots;
@@ -141,6 +150,12 @@ public final class PieceDownloader {
         synchronized (cfg) {
             return cfg.copy();
         }
+    }
+
+    /** 服务端限速期内？只读一个共享标志：不改配置、不重建线程池，退出靠时间窗自己过期。 */
+    private boolean limitedNow() {
+        CdnThrottle t = throttle;
+        return t != null && t.limited();
     }
 
     public void setLogger(Logger logger) {
@@ -217,10 +232,15 @@ public final class PieceDownloader {
      * 之后的头几秒，播放器等不及就先挂了 —— 那一幕在 {@code req=} 里只剩一个很小的 out，
      * 分不清是节点慢、许可排队、探路白花了一次，还是压根没被收进代理（见 {@code AccelProxy}
      * 的 busy 行）。这些数只有在此刻在场的那条线程上才量得准，所以随流创建、只打一次。
+     *
+     * <p>行末的 {@code fp=}/{@code demoted=}（这条流属于哪个网络、该网络已降级几条）搭的是这趟
+     * 顺风车：它们单独成行时，一次播放就是两行（视频流＋音频流两个 key），日志自己变成噪音，
+     * 而读不到当前指纹连「投毒验证降级」都跑不动。
      */
     public final class Startup {
         private final long openedAt = System.currentTimeMillis();
         private final int liveAtOpen;
+        private final CdnResolver resolver;
         private int probesFired;
         private long probeMs;
         private long probeFastestMs;
@@ -228,8 +248,9 @@ public final class PieceDownloader {
         private String node = "none";
         private boolean logged;
 
-        Startup(int liveAtOpen) {
+        Startup(int liveAtOpen, CdnResolver resolver) {
             this.liveAtOpen = liveAtOpen;
+            this.resolver = resolver;
         }
 
         /** 探路这一段花了多久、发了几条（0 条表示这代没探路，直接按候选顺序流）。 */
@@ -261,16 +282,21 @@ public final class PieceDownloader {
                 return;
             }
             logged = true;
+            String fp = resolver == null ? "" : resolver.fingerprint();
             log("startup: first byte in " + (System.currentTimeMillis() - openedAt)
                     + "ms [live=" + liveAtOpen + " probes=" + probesFired
                     + " probe=" + probeMs + "ms fastest=" + probeFastestMs + "ms queue=" + queueMs
-                    + "ms free=" + gate.available() + " node=" + node + "]");
+                    + "ms free=" + gate.available() + " node=" + node
+                    + (fp.isEmpty() ? "" : " fp=" + fp + " demoted=" + resolver.demotedCount()) + "]");
         }
     }
 
-    /** 给一条新连接建起播账面；live 是代理此刻在管的连接数（限流判据用的就是它）。 */
-    public Startup newStartup(int liveAtOpen) {
-        return new Startup(liveAtOpen);
+    /**
+     * 给一条新连接建起播账面；live 是代理此刻在管的连接数（限流判据用的就是它），
+     * resolver 只用来在行末带上网络指纹与降级数，不参与任何取数决策。
+     */
+    public Startup newStartup(int liveAtOpen, CdnResolver resolver) {
+        return new Startup(liveAtOpen, resolver);
     }
 
     /**
@@ -332,6 +358,11 @@ public final class PieceDownloader {
         // 数计的地盘踩出来（窗口 128 条时两条镜像被我们自己打封）。
         int cap = (int) Math.max(2L, Math.min((long) pieces.length,
                 Math.min(cfg.windowBytes / Math.max(1L, chunk), (long) windowSlots * 2L)));
+        if (limitedNow()) {
+            // 节点正在用 412/429 说「问得太凶」：窗口收成一块、对冲与探路都停，先把速率压下来。
+            // 只降并发不关加速——彻底退回单连接是官方行为，那样根本不需要这个模块。
+            cap = 1;
+        }
         try {
             streamWindowed(resolver, headers, pieces, cap, head.url, total, sink, token);
         } catch (InterruptedException e) {
@@ -406,7 +437,9 @@ public final class PieceDownloader {
             stop = end;
         }
         // 只要一小段（索引盒那种，一口就吃完）就别多花探路钱：直接按候选顺序流。
-        boolean worthProbing = wanted > (long) HEAD_FLUSH_BYTES && candidates.size() > 1 && !token.cancelled();
+        // 降速期同理：探路是「同时问好几条」，正是刚被 429 警告过的那个动作。
+        boolean worthProbing = wanted > (long) HEAD_FLUSH_BYTES && candidates.size() > 1
+                && !token.cancelled() && !limitedNow();
         SpecSink spec = null;
         CancelToken specToken = null;
         String specUrl = null;
@@ -714,11 +747,18 @@ public final class PieceDownloader {
         }
         if (!probeToken.cancelled()) {
             if (status >= 400 && status < 500) {
-                resolver.failure(url, status);
+                resolver.failure(url, status, failure);
+            } else if (status > 0 && !gotByte) {
+                // 节点答了响应头却一个字节没给：这是节点自己的行为，该记封禁账。
+                resolver.failure(url, status, failure);
             } else if (status > 0 || !gotByte) {
                 // 只退避：慢/连不上/半途断的节点不该进封禁表，但也不该排在起播第一位。
-                resolver.failurePartial(url, gotByte ? 1L : 0L);
+                // status==0 就是「没拿到任何 HTTP 响应」，成因在本机链路，同样只退避。
+                resolver.failurePartial(url, gotByte ? 1L : 0L, failure);
             }
+        } else if (!gotByte) {
+            // 上层已经收场，封禁与退避都不必再记；但「这台机器叫不应它」跟收不收场无关。
+            resolver.noteZeroByteFailure(url, failure);
         }
         log("probe failed on " + RangeCore.hostOf(url) + ": " + failure);
         done.offer(new ProbeFailure(failure, status));
@@ -795,14 +835,18 @@ public final class PieceDownloader {
             return new Head(delivered, total, url, null);
         } catch (IOException e) {
             if (token.cancelled()) {
-                // 播放器换清晰度/挂断：算交付，不算节点的账。
+                // 播放器换清晰度/挂断：算交付，不算节点的账——但一个字节都没拿到又没人答应，
+                // 那是链路的事，挂不挂断都得记账，否则每次起播重新撞一遍。
+                if (delivered == 0L) {
+                    resolver.noteZeroByteFailure(url, e);
+                }
                 return new Head(delivered, total, url, null);
             }
             if (delivered > 0L) {
-                resolver.failurePartial(url, delivered);
+                resolver.failurePartial(url, delivered, e);
                 return new Head(delivered, total, url, null);
             }
-            resolver.failure(url, status);
+            resolver.failure(url, status, e);
             throw e;
         } finally {
             if (response != null) {
@@ -878,10 +922,10 @@ public final class PieceDownloader {
                 }
                 if (received > 0L) {
                     // 中途断开带真实字节数：BanList 只封「一个字节都没拿到」的失败，这里只退避。
-                    resolver.failurePartial(url, received);
+                    resolver.failurePartial(url, received, e);
                     return;
                 }
-                resolver.failure(url, status);
+                resolver.failure(url, status, e);
             } finally {
                 if (response != null) {
                     response.close();
@@ -1129,8 +1173,9 @@ public final class PieceDownloader {
                     }
                 }
                 List<String> batch = new ArrayList<String>(startup ? untried : (open.isEmpty() ? untried : open));
+                // 降速期不对冲：同一份子块问两条节点是两次请求，正是被 429 警告的那种速率。
                 int width = startup ? Math.min(ROUND_CANDIDATES, batch.size())
-                        : Math.min(HEDGE_WIDTH, batch.size());
+                        : (limitedNow() ? 1 : Math.min(HEDGE_WIDTH, batch.size()));
                 if (width <= 0) {
                     break;
                 }
@@ -1283,13 +1328,17 @@ public final class PieceDownloader {
         } catch (IOException e) {
             if (attemptToken.cancelled() || outer.cancelled()) {
                 // 对冲失败方或播放器改清晰度：这不是节点的错，参考实现同样跳过 AbortError。
+                // 唯一的例外是「一个字节都没拿到、本机也叫不应它」——这件事与谁挂断无关。
+                if (received == 0L) {
+                    resolver.noteZeroByteFailure(url, e);
+                }
                 throw e;
             }
             if (received > 0L) {
                 // 中途断开带真实字节数：只退避，不进封禁表。
-                resolver.failurePartial(url, received);
+                resolver.failurePartial(url, received, e);
             } else {
-                resolver.failure(url, status);
+                resolver.failure(url, status, e);
             }
             throw e;
         } finally {

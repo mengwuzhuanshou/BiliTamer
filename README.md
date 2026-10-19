@@ -40,6 +40,8 @@ An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`,
 | 禁止竖屏播放器 No portrait player | 首页竖屏卡的跳转路由 `bilibili://story/<id>` 改写为 `bilibili://video/<id>`，落进传统横屏播放器；只保留 id、丢掉卡片自带的预载参数段（带着它会让横屏播放页在启动时崩，见 PITFALLS #40）/ Rewrite story routes on feed cards to the landscape player's own minimal route (id only — the card's preload query is dropped, because keeping it crashes the target page; see PITFALLS #40) | 关 off |
 | 关闭大卡片 No large cards | 按 `card_type` 移除占满整屏宽度的卡（轮播 `banner_v*`、大封面 `large_cover_v*`、内联播放 `inline_av_*`），双列小卡与直播/广告卡不受影响 / Drop full-width feed cards (carousel, large-cover, inline-play) by `card_type`; two-column small cards, live and ad cards are untouched | 关 off |
 | 干掉云视听小电视 No activity overlay | 清空弹幕回包 `DmViewReply` 里的 `activity_meta` 活动浮层素材（视频内下发的活动挂件）/ Clear the `activity_meta` activity-overlay material from the dm reply | 关 off |
+| 直播后台播放入口 Live background play | 解锁直播页的后台播放入口（无设置项，随模块生效）/ Unlock the background-play entry on the live page (no settings switch; active with the module) | 开 on |
+| 下载加速 Download acceleration | 在线播放与离线下载改接本机回环代理，多 CDN 节点多区间并发取数、按序回吐；离线取到的字节前台播放直接复用（实验特性，缓存默认配额 2 GB、LRU，DRM/免流地址不接管）/ Route playback and offline downloads through a loopback proxy that fetches ranges concurrently from multiple CDN nodes; offline bytes are reused by foreground playback (beta; 2 GB LRU cache default; DRM/zero-rating URLs untouched) | 关 off |
 | 配置同步 Config sync | 设置保存经启动投递+host-conf 代次协议生效，不依赖 root / Settings delivered at launch with a host-conf generation protocol — no root needed | — |
 
 所有开关独立可逆；总开关关闭后模块完全休眠。
@@ -98,6 +100,8 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
 
 ## 从源码构建 / Build from source
 
+    BILITAMER_JDK=/path/to/jdk17 python tools/build_module.py
+    # 已设置 JAVA_HOME，或 PATH 上有 javac/java 时也可直接：
     python tools/build_module.py
 
 * 无 Gradle / Android SDK 依赖：javac(--release 8, 编译桩) → dalvik-dx → 手写 AXML → zip(arsc 对齐) → apksig v1+v2+v3 签名，约 30 秒
@@ -108,7 +112,7 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
   the libxposed API jar is in tools/libxposed/ (io.github.libxposed:api 102.0.0, Apache-2.0 — see PROVENANCE.md);
 * 需要 JDK（`BILITAMER_JDK` 或 `JAVA_HOME`，或 PATH 上有 javac/java）
   / Requires a JDK (BILITAMER_JDK or JAVA_HOME, or javac/java on PATH);
-* 签名密钥经 gitignored 的 `tools/signing.local` 提供（KS_PATH=/KS_PASS=/KS_ALIAS=），仓库不含任何密钥；
+* 签名密钥经 gitignored 的 `tools/signing.local` 提供（密钥库路径、口令、别名三项），仓库不含任何密钥；
   自行生成：`keytool -genkeypair -v -keystore my.jks -alias mymod -keyalg RSA -keysize 2048 -validity 10000`
   / The keystore is supplied via gitignored tools/signing.local — the repo contains no keys;
 * 产物：`dist/BiliTamer-v<版本>.apk` / output at dist/BiliTamer-v<ver>.apk.
@@ -124,22 +128,12 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
     │   ├── libxposed/                  # libxposed API jar（Apache-2.0）+ PROVENANCE.md
     │   ├── signing.local               # 签名密钥（gitignored）/ keystore pointer (gitignored)
     │   └── icon/ic_launcher.png
-    ├── app/src/main/
-    │   ├── assets/xposed_init          # classic 入口占位（libxposed 模式下构建时不打包）/ classic placeholder
-    │   └── java/com/tamer/bili/
-    │       ├── MainHook.java           # libxposed 入口 / entry (XposedModule.onPackageReady)
-    │       ├── BiliConfig.java         # 配置加载 / config loading
-    │       ├── hooks/
-    │       │   ├── HookApi.java            # hook 统一封装 / libxposed wrapper
-    │       │   ├── IpLocationHooks.java    # 评论/主页 IP 属地 / scoped IP location
-    │       │   ├── PlayerCodecHooks.java   # 解码/音质/HDR 顺位 / codec & audio & HDR preference
-    │       │   ├── ListenPauseHooks.java   # 听视频听完暂停 / pause after video
-    │       │   ├── InteractHintHooks.java  # 隐藏互动提示 / hide interaction hints
-    │       │   ├── FeedCleanHooks.java     # 首页推荐流四项 / the four home-feed rewrites
-    │       │   ├── DmActivityMetaHooks.java # 干掉云视听小电视 / clear dm activity_meta
-    │       │   ├── FeedTagHooks.java       # 首页推荐分区屏蔽 / feed partition blocker
-    │       │   └── HomeNoAutoRefreshHooks.java # 首页不自动刷新 / no home auto-refresh
-    │       └── ui/SettingsActivity.java    # 纯代码设置界面 / code-only settings UI
+    ├── app/src/main/java/com/tamer/bili/
+    │   ├── MainHook.java               # libxposed 入口 + 特性装配 / entry & feature wiring
+    │   ├── BiliConfig.java             # 配置键与默认值 / config keys & defaults
+    │   ├── hooks/                      # 各功能 hook 组：身份/解码/首页布局/直播/听视频/互动提示/feed 清洗/弹幕浮层
+    │   ├── accel/                      # 回环代理、多 CDN 分段下载、跨进程块缓存 / loopback proxy, range downloader, shared cache
+    │   └── ui/                         # 纯代码设置界面、配置投递、分区词表编辑 / code-only settings, config delivery
     └── PITFALLS.md                     # 实现笔记与坑 / implementation notes & pitfalls
 
 ## 排查 / Troubleshooting
@@ -148,9 +142,9 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
   / filter `BiliTamer` in LSPosed logs; look for `hooks installed` and per-hook `ok` lines;
 * 详细日志开关打开后可见 `kmp header value rewritten` / `rest params rewritten` 等改写细节
   / enable verbose logging for rewrite details;
-* 功能不生效：确认开关已开、作用域勾选、强停重开；升级 B 站后混淆锚点（`up1.a`/`XA0.a` 等）可能
-  漂移导致静默失效，以日志为准 / after app upgrades the obfuscated anchors may drift silently —
-  trust the logs, and see PITFALLS.md for calibration.
+* 功能不生效：确认开关已开、作用域勾选、强停重开；升级 B 站后混淆锚点（如 fnval 的 `aK1.a`、
+  feed 入口 `pegasus.request.h.a`）可能漂移导致静默失效，以日志为准 / after app upgrades the
+  obfuscated anchors may drift silently — trust the logs, and see PITFALLS.md for calibration.
 
 ## 已知限制 / Known limitations
 
