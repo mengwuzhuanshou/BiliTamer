@@ -67,7 +67,7 @@ public final class ListenPauseHooks {
         } catch (Throwable t) {
             api.debug("listen: biz layer unavailable (6.5.0+ expected): " + t);
         }
-        // 6.5.0+ 主修复：听模式完成监听器（6.5.0=CE1.f / 6.6.0=lK1.j，按角色定位）
+        // 6.5.0+ 主修复：听模式完成监听器（6.5.0=CE1.f / 6.6.0=lK1.j / 6.7.1=HL1.l，按角色定位）
         // + 播放器 setDataSource/prepareAsync/start 的 6s 完成守卫（拦下一集加载）。
         installListenCompletionGuard();
         // 观测探针（once，无性能影响）。
@@ -94,18 +94,22 @@ public final class ListenPauseHooks {
      */
 
     /**
-     * 听模式完成监听器定位（6.6.0 漂移实证）：
+     * 听模式完成监听器定位（6.6.0/6.7.1 漂移实证）：
      * 6.5.0 = CE1.f（classes26，播放器核心容器 vJ1.m 的字段 H 就是它）；
      * 6.6.0 = lK1.j（classes28，容器换成 lK1.o，字段仍是 H，onCompletion 体仍是
-     * getCurrentPosition + 转发 onCompletion，与 6.5.0 的 CE1.f 分支逐条同形）。
+     * getCurrentPosition + 转发 onCompletion，与 6.5.0 的 CE1.f 分支逐条同形）；
+     * 6.7.1 = HL1.l（classes28，容器换成 HL1.r：字段 K 就是它，且容器上
+     * {@code b : IMediaPlayAdapter}（真名）、{@code x : OnCompletionListener}；
+     * onCompletion 体仍为 getCurrentPosition → 读容器 h/f → 转发容器 x）。
      * 类名会整族换包且旧名会被 R8 复用，所以按「角色」验收而不是只认名字：
      * ① 实现 IMediaPlayer$OnCompletionListener；② 只有一个实例字段的 lambda 持有者；
      * ③ 那个字段的类型是播放器核心容器——判定依据是容器里必须有 IMediaPlayAdapter
      * 字段（真名，跨版本稳定）。splash 广告那类监听器持有的是 SplashViewModel，
-     * 第 ③ 步就把它挡掉（6.6.0 实测 tF1.f 即此类，勿挂）。
+     * 第 ③ 步就把它挡掉（6.6.0 实测 tF1.f 即此类，6.7.1 同类是 PG1.f，都勿挂；
+     * 6.7.1 全量角色扫描 32 个监听器实现者里仅此一个过 ③）。
      */
     private Class<?> findListenCompletionListener() {
-        for (String cn : new String[]{"lK1.j", "CE1.f"}) {
+        for (String cn : new String[]{"HL1.l", "lK1.j", "CE1.f"}) {
             Class<?> c;
             try {
                 c = api.load(cl, cn);
@@ -167,7 +171,7 @@ public final class ListenPauseHooks {
                 }
             }
             if (oc == null) {
-                api.warn("listen: listen-mode onCompletion not found (lK1.j / CE1.f)");
+                api.warn("listen: listen-mode onCompletion not found (HL1.l / lK1.j / CE1.f)");
             } else {
                 api.deoptimize(oc);
                 api.addHook("listen: completion guard", oc, new XposedInterface.Hooker() {

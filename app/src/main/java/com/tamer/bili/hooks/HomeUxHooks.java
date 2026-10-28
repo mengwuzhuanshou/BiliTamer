@@ -554,8 +554,11 @@ public final class HomeUxHooks {
     /**
      * 解析「路由动作」这一发：{总线方法, (String,int,int) 构造器, 动作类}，解析一次缓存复用。
      * 候选表按版本 dex 里 {@code PageRouteComponent} 那个 Intent 处理口的 new-instance 逐版取来
-     * （6.6.0=bE1.g→v0、6.5.0=jD1.g→w0、6.4.0=FC1.g→w0、6.3.0=FA1.g→x0，四处函数体逐条对读，
-     * 三步形状「读 vm 字段 → new <包>.g(url,0,2) → vm.<总线>(g)」四版一致）。
+     * （6.7.1=xF1.g→C0、6.6.0=bE1.g→v0、6.5.0=jD1.g→w0、6.4.0=FC1.g→w0、6.3.0=FA1.g→x0，
+     * 五处函数体逐条对读，三步形状「读 vm 字段 → new <包>.g(url,0,2) → vm.<总线>(g)」各版一致；
+     * 6.7.1 取证：{@code PageRouteComponent#b4(Intent)}、
+     * {@code TopLeftComponent$initActionHandler$1$1}（头像那一发）都是
+     * new xF1/g(String,I,I) + HomeFrameViewModel#C0(LxF1/b;)V）。
      * 判定不靠包名猜：动作类必须有 (String,int,int) 构造器，且当前 VM 类上存在
      * 「单参 void、参数是接口、且该接口正好能接住这个动作类」的方法——两条同时成立才算认出总线。
      */
@@ -565,7 +568,7 @@ public final class HomeUxHooks {
             return cached;
         }
         ClassLoader loader = vmCls.getClassLoader();
-        String[] candidates = {"bE1.g", "jD1.g", "FC1.g", "FA1.g"};
+        String[] candidates = {"xF1.g", "bE1.g", "jD1.g", "FC1.g", "FA1.g"};
         for (int ci = 0; ci < candidates.length; ci++) {
             Class<?> actionCls;
             try {
@@ -668,9 +671,15 @@ public final class HomeUxHooks {
      * 形状同构 ≠ 角色相同：bE1/c;{field I a, <init>(I)} 与 6.5.0 的 jD1/c; 逐条同形，
      * 但它在 6.6.0 只被 com.bilibili.search2.halfscreen.i 构造、被 PageRouteComponent
      * 消费后转成 bE1/g(String,I,I) 再投回总线——是「路由索引」不是「tab 索引」。
-     * 所以只保留实机确证过的 6.4.0/6.5.0 候选；6.6.0 上这里必然解析失败（首次点击打
-     * 一串 iface candidate 后记住这个事实，不再重扫/重刷），改走宿主路由动作
-     * {@link #dispatchMineRoute}。
+     * 所以 6.6.0 上这里必然解析失败（首次点击打一串 iface candidate 后记住这个事实，
+     * 不再重扫/重刷），改走宿主路由动作 {@link #dispatchMineRoute}。
+     * 6.7.1 点击链又回到总线了，且是同一形状的 (int) 动作：
+     * {@code home/components/bottomtab/c#invoke(Object)} 末段读
+     * {@code home/components/a.c : HomeFrameViewModel} → {@code new xF1/c(I)} →
+     * {@code HomeFrameViewModel#C0(LxF1/b;)V}（dex 单元 0091/0097/009a，逐条对读）。
+     * xF1/c 全 dex 只有这一处 new，角色就是「选中第 i 个底栏 tab」；
+     * 同族的 xF1/v(I,TabSelectFromType) 才是别的语义（PageBuildComponent#onPageSelected
+     * 与屏幕适配控件 new 的「滑动切页回执」），别混。
      */
     private boolean dispatchMineTabSelect() {
         try {
@@ -705,8 +714,8 @@ public final class HomeUxHooks {
                         }
                     }
                 }
-                api.warn("khome: tab select action class drift, tried jD1.c/FC1.c"
-                        + " (6.6.0 起底栏点击不走动作总线，见 findTabDispatch 注释)");
+                api.warn("khome: tab select action class drift, tried xF1.c/jD1.c/FC1.c"
+                        + " (6.6.0 底栏点击不走总线；6.7.1 又走 xF1.c→C0，见 findTabDispatch 注释)");
             }
             return false;
         } catch (Throwable t) {
@@ -723,7 +732,7 @@ public final class HomeUxHooks {
      */
     private Object[] findTabDispatch(Class<?> vmCls) {
         ClassLoader vmCl = vmCls.getClassLoader();
-        String[] candidates = {"jD1.c", "FC1.c"};
+        String[] candidates = {"xF1.c", "jD1.c", "FC1.c"};
         for (int ci = 0; ci < candidates.length; ci++) {
             Class<?> actionCls;
             try {
@@ -1619,12 +1628,17 @@ public final class HomeUxHooks {
 
     private final AtomicBoolean renderFilterLogged = new AtomicBoolean(false);
 
+    /** 底栏容器类所在包的候选单字母类名（6.7.1 实测容器在 j，历史版本在 g）。 */
+    private static final String[] BOTTOMTAB_CANDIDATES = {
+            "j", "g", "a", "b", "c", "d", "e", "f", "h", "i", "k", "l", "m", "n", "o",
+    };
+
     /**
-     * 底栏渲染隐藏：HomeBottomTabContainerKt（dex 名 bottomtab.g）的容器 Compose 函数
-     * a(11参, p1=List tabs, p9=Composer, p10=int)。BEFORE 把 List 参数换成去掉「我的」
-     * 的副本——只影响画出来的 tab，数据列表/pager 里「我的」页原样保留，头像仍可由
-     * 动作总线派发（6.4.0/6.5.0 的 {@code w0(FC1.c(mineSlotIndex)))）或宿主路由动作
-     * （6.6.0 的 {@link #dispatchMineRoute}）打开完整页。
+     * 底栏渲染隐藏：HomeBottomTabContainerKt（类名每轮漂移，见 {@link #BOTTOMTAB_CANDIDATES}）
+     * 的容器 Compose 函数 a(11参, p1=List tabs, p9=Composer, p10=int)。BEFORE 把 List
+     * 参数换成去掉「我的」的副本——只影响画出来的 tab，数据列表/pager 里「我的」页原样保留，
+     * 头像仍可由动作总线派发（6.4.0/6.5.0 的 {@code w0(FC1.c(mineSlotIndex)))）或宿主路由动作
+     * （{@link #dispatchMineRoute}）打开完整页。
      * 若被删项恰是选中项（头像刚派发过），用 KC1.d 自家 copy 工厂
      * d.a(item,null,null,true,false,65519) 克隆首项置选中，避免底栏无高亮。
      *
@@ -1636,20 +1650,34 @@ public final class HomeUxHooks {
      * 快照保持 -1（=未知），合成点击自然不会被误用。
      */
     private void installBottomBarRenderFilter(ClassLoader loader) throws Throwable {
-        Class<?> g = api.load(loader, "tv.danmaku.bili.khome.widget.bottomtab.g");
+        // 容器类名每轮混淆都会挪（6.4/6.5 是 bottomtab.g，6.7.1 是 bottomtab.j，而 g 在
+        // 6.7.1 里是个 Function3 lambda），所以按签名找、不按类名找。
         Method target = null;
-        for (Method mm : g.getDeclaredMethods()) {
-            Class<?>[] ps = mm.getParameterTypes();
-            if (ps.length == 11 && ps[1] == List.class
-                    && ps[9].getName().contains("Composer") && ps[10] == int.class) {
-                target = mm;
+        Class<?> owner = null;
+        for (String simple : BOTTOMTAB_CANDIDATES) {
+            Class<?> c;
+            try {
+                c = api.load(loader, "tv.danmaku.bili.khome.widget.bottomtab." + simple);
+            } catch (Throwable t) {
+                continue;
+            }
+            for (Method mm : c.getDeclaredMethods()) {
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length == 11 && ps[1] == List.class
+                        && ps[9].getName().contains("Composer") && ps[10] == int.class) {
+                    target = mm;
+                    owner = c;
+                    break;
+                }
+            }
+            if (target != null) {
                 break;
             }
         }
         if (target == null) {
-            api.warn("khome: bottom tab container fn (11-arg) not found on " + g.getName()
-                    + " -> render-level mine hide not effective on this version (6.5.0+"
-                    + " container is a compose lambda), skip; mine tab stays default-visible");
+            api.warn("khome: bottom tab container fn (11-arg) not found in "
+                    + "tv.danmaku.bili.khome.widget.bottomtab.* -> render-level mine hide not"
+                    + " effective on this version, skip; mine tab stays default-visible");
             return;
         }
         api.deoptimize(target);
@@ -1692,7 +1720,7 @@ public final class HomeUxHooks {
                 return chain.proceed();
             }
         });
-        api.info("khome: render filter hook ok -> " + g.getName() + "." + target.getName());
+        api.info("khome: render filter hook ok -> " + owner.getName() + "." + target.getName());
     }
 
     /** 这一帧底栏列表里「我的」的下标（按 tab 路由名认），没有则 -1。 */

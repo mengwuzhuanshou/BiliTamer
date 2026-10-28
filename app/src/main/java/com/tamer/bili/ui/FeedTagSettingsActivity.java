@@ -34,6 +34,8 @@ public class FeedTagSettingsActivity extends Activity {
     private EditText searchView;
     private EditText bulkView;
     private TextView countView;
+    private android.os.Handler mHandler;
+    private static final long ACK_WAIT_MS = 4000L;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -177,10 +179,37 @@ public class FeedTagSettingsActivity extends Activity {
                 // 拉起失败≠保存失败：本地已存，但宿主还拿不到新值，界面必须区分这两件事。
                 Toast.makeText(this, "已保存，但投递失败（" + deliveryError
                         + "），请手动彻底退出 B 站再打开一次", Toast.LENGTH_LONG).show();
+            } else {
+                scheduleAckToast();
             }
         } else {
             Toast.makeText(this, "⚠ 保存失败", Toast.LENGTH_LONG).show();
         }
+    }
+
+    /** 4 秒后用回执说话：startActivity 不抛异常不代表 extras 真到了宿主。 */
+    private void scheduleAckToast() {
+        if (mHandler == null) {
+            mHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        }
+        mHandler.postDelayed(new Runnable() {
+            @Override public void run() {
+                String r = ConfSync.rootSyncStatus(); // 这页没有状态行，root 兜底成败并进同一条回执提示
+                Toast.makeText(FeedTagSettingsActivity.this,
+                        ConfSync.describeAck(FeedTagSettingsActivity.this, ACK_WAIT_MS)
+                                + (r == null ? "" : "\n" + r),
+                        Toast.LENGTH_LONG).show();
+            }
+        }, ACK_WAIT_MS);
+    }
+
+    @Override
+    protected void onDestroy() {
+        ConfSync.disarmAckProbe(this);
+        if (mHandler != null) {
+            mHandler.removeCallbacksAndMessages(null);
+        }
+        super.onDestroy();
     }
 
     private void refreshAll() {

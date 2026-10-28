@@ -24,6 +24,9 @@ public class SettingsActivity extends Activity {
 
     private LinearLayout root;
     private TextView statusView;
+    private android.os.Handler mHandler;
+    /** 等回执的时长：拉起 + Hook 应用 + 广播回来到达本进程，实测远小于这个值。 */
+    private static final long ACK_WAIT_MS = 4000L;
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -143,6 +146,12 @@ public class SettingsActivity extends Activity {
                 "清掉弹幕回包里的 activity_meta 活动浮层（跑动的「云视听小电视」小电视形象）。\n"
                 + "只在活动期服务端真下发时才有东西可清；日志会明确写出两种情况（清了几条 /\n"
                 + "钩子进来了但这批本来就是空的），不会静默假生效。改后需强停 B 站重开");
+        addSwitch(BiliConfig.KEY_PLAYER_NO_UNDER_AD, "干掉详情页广告", "No detail-page ads",
+                "国际版原生没有这些广告位：它们是身份改写让服务端把客户端当成国内版之后才下发的，\n"
+                + "属于改写带来的副作用，所以出厂默认就开着。清三处：播放器下方的商品卡、简介区楼层\n"
+                + "广告、简介区「视频提及」里的游戏推广卡（同段里 UP 自己的课程/充电/手办链接不动）。\n"
+                + "半屏面板、国际版自有广告等一律不动。\n"
+                + "广告按稿件内容下发，不是每条都有；日志会写明「清掉了」或「这批本来就没有」。");
 
         section("首页", "Home");
         addSwitch(BiliConfig.KEY_NO_AUTO_REFRESH, "首页不自动刷新", "No auto refresh on home",
@@ -391,10 +400,11 @@ public class SettingsActivity extends Activity {
                 deliveryError = ConfSync.launchTargetWithConf(this);
             }
             if (auto) {
-                st = "状态：✅ 已保存（gen=" + gen + "）\nconf 探针见 B 站启动日志首行 confSrc=";
+                st = "状态：✅ 已保存（gen=" + gen + "）\n" + ConfSync.describeAck(this, 0);
             } else if (deliveryError == null) {
-                st = "状态：✅ 已保存（gen=" + gen + "），正在拉起 B 站同步配置"
-                        + "\nconf 探针见 B 站启动日志首行 confSrc=";
+                // 「已发出」不等于「已生效」：回执要等，所以这里先给待发文案，再定时补真实读数。
+                st = "状态：✅ 已保存（gen=" + gen + "），正在拉起 B 站同步配置…";
+                scheduleAckRefresh();
             } else {
                 // 投递失败必须看得见：本地已存但不拉起，宿主那边用的还是旧配置，
                 // 用户会读成「开关坏了」。这里给一条不依赖我们拉起的手动重挂路径。
@@ -403,9 +413,9 @@ public class SettingsActivity extends Activity {
                         + "\n请手动彻底退出 B 站（从最近任务划掉）再打开一次，配置会在那时生效。";
             }
         } else {
-            st = "状态：❌ 保存失败\nconf 探针见 B 站启动日志首行 confSrc=";
+            st = "状态：❌ 保存失败";
         }
-        statusView.setText(st.toString());
+        statusView.setText(withRootLine(st).toString());
         android.util.Log.i("BiliTamer", "persistAll: gen=" + gen + " auto=" + auto
                 + (deliveryError == null ? "" : " deliveryError=" + deliveryError));
         if (!auto) {
@@ -415,5 +425,39 @@ public class SettingsActivity extends Activity {
                                     : "已保存，但投递失败，请手动重启 B 站"),
                     Toast.LENGTH_LONG).show();
         }
+    }
+
+    /**
+     * 状态行末尾挂一行 root 兜底成败。放状态行不放弹窗：这条不是「你这次操作失败了」，
+     * 而是「这台机器上备胎通道的状态」——用户截图远程取证时正好需要它，又不该每次弹窗。
+     */
+    private String withRootLine(String st) {
+        String r = ConfSync.rootSyncStatus();
+        return r == null ? st : st + "\n" + r;
+    }
+
+    /** 4 秒后回读一次回执：拉起是异步的，界面不能把「已发出」说成「已生效」。 */
+    private void scheduleAckRefresh() {
+        if (mHandler == null) {
+            mHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        }
+        mHandler.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (statusView == null) {
+                    return;
+                }
+                statusView.setText(withRootLine("状态：" + ConfSync.describeAck(
+                        SettingsActivity.this, ACK_WAIT_MS)));
+            }
+        }, ACK_WAIT_MS);
+    }
+
+    @Override
+    protected void onDestroy() {
+        ConfSync.disarmAckProbe(this);
+        if (mHandler != null) {
+            mHandler.removeCallbacksAndMessages(null);
+        }
+        super.onDestroy();
     }
 }

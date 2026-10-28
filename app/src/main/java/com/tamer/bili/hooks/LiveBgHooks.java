@@ -14,11 +14,14 @@ import io.github.libxposed.api.XposedInterface;
  * 探针实证），且国内版同款面板此门为放行状态。
  *
  * 实现：把该门的实现类（6.5.0=HX/c$b、HX/c$c，接口 GX.b，门方法 q1()Z；
- * 6.6.0=JX/b$b、JX/b$c，接口 IX.b，门方法 m1()Z——dex 逐条同形，连日志方法
- * p1(String,Object[]) -> l1(String,Object[]) 都对得上）的「无参 boolean 门」强制返回
+ * 6.6.0=JX/b$b、JX/b$c，接口 IX.b，门方法 m1()Z；6.7.1=TX/d$b、TX/d$c，接口 SX.b，
+ * 门方法又回到 q1()Z——dex 逐条同形，连日志方法
+ * p1(String,Object[]) -> l1(String,Object[]) -> p1(String,Object[]) 都对得上）的
+ * 「无参 boolean 门」强制返回
  * false —— 后台播放设置项始终创建。类名/方法名都会整族换，所以验收看角色形状
  * （getDanmakuParams + getPlayerParams + EssentialInfo 字段 + 恰好一个无参 boolean 方法），
- * 名字只作入口（PITFALLS #16）。q1/m1 仅被面板构建与该设置项使用（全 dex 引用仅两处），
+ * 名字只作入口（PITFALLS #16）。门仅被面板构建与该设置项使用（6.7.1 invoke-interface
+ * 全 dex 复核：只有 LiveRoomSettingPanelV2.fm() 一处），
  * 影响面收敛。零监听、零轮询：只在宿主构建设置面板时执行一次布尔替换。
  */
 public final class LiveBgHooks {
@@ -37,12 +40,13 @@ public final class LiveBgHooks {
 
     public void install() {
         // 实现类候选（混淆名随构建整族换：6.5.0=HX.c$b/$c，6.6.0=JX.b$b/$c，
-        // 接口 GX.b -> IX.b，门方法 q1()Z -> m1()Z，日志方法 p1 -> l1，dex 逐条同形）。
+        // 6.7.1=TX.d$b/$c，接口 GX.b -> IX.b -> SX.b，门方法 q1()Z -> m1()Z -> q1()Z，
+        // 日志方法 p1 -> l1 -> p1，dex 逐条同形）。
         // 名字只当入口，真正验收的是 findGateMethod 的角色形状——旧名被 R8 复用也不会误挂。
-        for (final String cn : new String[]{"JX.b$b", "JX.b$c", "HX.c$b", "HX.c$c"}) {
+        for (final String cn : new String[]{"TX.d$b", "TX.d$c",
+                "JX.b$b", "JX.b$c", "HX.c$b", "HX.c$c"}) {
             installNamed(cn);
         }
-        installGateDump();
     }
 
     /**
@@ -116,88 +120,4 @@ public final class LiveBgHooks {
         }
     }
 
-    /**
-     * 门控实值探针：LiveRoomPlayerViewModel.onPlayerServiceEvent 入口处，把「仅播声音」
-     * 四道门的当前值打出来（w0 状态流 / params.h / 业务信息X / 播放器实例）。只日志、
-     * 每次事件一行、限频 60 条——定位直播后台播放失败发生在哪道门。
-     */
-    private void installGateDump() {
-        try {
-            Class<?> vm = api.load(cl, "com.bilibili.bililive.room.ui.roomv3.player.LiveRoomPlayerViewModel");
-            java.lang.reflect.Method ev = null;
-            for (java.lang.reflect.Method m : vm.getDeclaredMethods()) {
-                if (m.getName().equals("onPlayerServiceEvent")) { ev = m; break; }
-            }
-            if (ev == null) {
-                api.info("livebg: onPlayerServiceEvent not found");
-                return;
-            }
-            api.deoptimize(ev);
-            api.addHook("livebg: gate dump", ev, new XposedInterface.Hooker() {
-                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                    try {
-                        if (gateDumps.incrementAndGet() <= 60) {
-                            Object thiz = chain.getThisObject();
-                            Object params = null;
-                            for (java.lang.reflect.Field f : thiz.getClass().getSuperclass().getDeclaredFields()) {
-                                // params 在基类字段 p
-                            }
-                            String ph = "?", bx = "?";
-                            for (java.lang.reflect.Field f : thiz.getClass().getDeclaredFields()) {
-                                if (!f.getType().getName().endsWith("PlayerParams")) continue;
-                                f.setAccessible(true);
-                                params = f.get(thiz);
-                            }
-                            if (params == null) {
-                                for (Class<?> cc = thiz.getClass().getSuperclass();
-                                        cc != null && params == null; cc = cc.getSuperclass()) {
-                                    for (java.lang.reflect.Field f : cc.getDeclaredFields()) {
-                                        if (!f.getType().getName().endsWith("PlayerParams")) continue;
-                                        f.setAccessible(true);
-                                        params = f.get(thiz);
-                                        break;
-                                    }
-                                }
-                            }
-                            if (params != null) {
-                                java.lang.reflect.Field hf = params.getClass().getField("h");
-                                hf.setAccessible(true);
-                                ph = String.valueOf(hf.getBoolean(params));
-                                java.lang.reflect.Field bf = params.getClass().getField("b");
-                                bf.setAccessible(true);
-                                Object biz = bf.get(params);
-                                if (biz != null) {
-                                    java.lang.reflect.Field xf = biz.getClass().getField("X");
-                                    xf.setAccessible(true);
-                                    bx = String.valueOf(xf.getBoolean(biz));
-                                }
-                            }
-                            Object w0 = null;
-                            try {
-                                java.lang.reflect.Field wf = api.load(cl, "lN.b").getField("w0");
-                                wf.setAccessible(true);
-                                Object flow = wf.get(null);
-                                if (flow != null) {
-                                    java.lang.reflect.Method gv = flow.getClass().getMethod("getValue");
-                                    gv.setAccessible(true);
-                                    w0 = gv.invoke(flow);
-                                }
-                            } catch (Throwable ig) {
-                                w0 = "err:" + ig;
-                            }
-                            api.info("livebg[gate]: w0=" + w0 + " params.h=" + ph + " biz.X=" + bx);
-                        }
-                    } catch (Throwable ignored) {
-                    }
-                    return chain.proceed();
-                }
-            });
-            api.info("livebg: gate dump ok");
-        } catch (Throwable t) {
-            api.info("livebg: gate dump unavailable: " + t);
-        }
-    }
-
-    private final java.util.concurrent.atomic.AtomicInteger gateDumps =
-            new java.util.concurrent.atomic.AtomicInteger(0);
 }

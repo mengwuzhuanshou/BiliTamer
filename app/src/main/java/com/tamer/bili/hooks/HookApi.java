@@ -139,4 +139,8 @@ public interface HookApi {
 
     /** 干掉云视听小电视：清空弹幕回包的 activity_meta 活动浮层（默认关）。 */
     boolean isPlayerNoActivityMetaEnabled();
+
+    /** 干掉详情页广告位：播放器下方商品卡 + 楼层广告 + 简介区「视频提及」的游戏推广卡
+     *  （默认开，身份改写引入的回归）。 */
+    boolean isPlayerNoUnderAdEnabled();
 }

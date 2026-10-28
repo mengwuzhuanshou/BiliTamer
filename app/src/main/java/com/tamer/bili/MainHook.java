@@ -74,7 +74,7 @@ public class MainHook extends XposedModule implements HookApi {
                 return;
             }
             ClassLoader cl = param.getClassLoader();
-            this.config = BiliConfig.loadForHook();
+            this.config = BiliConfig.loadForHook(hostPkg);
             boolean probe = isProbeEnabled();
             boolean main = hostPkg.equals(processName);
             boolean web = BiliConfig.WEB_PROCESS.equals(processName);
@@ -134,7 +134,8 @@ public class MainHook extends XposedModule implements HookApi {
                     + " feed_clean_card=" + isFeedCleanCardEnabled()
                     + " feed_no_portrait=" + isFeedNoPortraitEnabled()
                     + " feed_no_large_card=" + isFeedNoLargeCardEnabled()
-                    + " player_no_activity_meta=" + isPlayerNoActivityMetaEnabled());
+                    + " player_no_activity_meta=" + isPlayerNoActivityMetaEnabled()
+                    + " player_no_under_ad=" + isPlayerNoUnderAdEnabled());
         } catch (Throwable t) {
             warn("logConfig failed: " + t);
         }
@@ -244,6 +245,11 @@ public class MainHook extends XposedModule implements HookApi {
                     new com.tamer.bili.hooks.DmActivityMetaHooks(MainHook.this, cl).install();
                 }
             });
+            install("ViewCmAdHooks", new ThrowingAction() {
+                @Override public void run() throws Throwable {
+                    new com.tamer.bili.hooks.ViewCmAdHooks(MainHook.this, cl).install();
+                }
+            });
             install("AccelHooks(main)", new ThrowingAction() {
                 @Override public void run() throws Throwable {
                     new com.tamer.bili.hooks.AccelHooks(MainHook.this, cl, false, hostPackage).install();
@@ -253,11 +259,16 @@ public class MainHook extends XposedModule implements HookApi {
     }
 
     /**
-     * 无 root 配置投递主链路（LineTamer v1.6.1 同款，最小权限）：设置页保存后带
-     * bili_conf/bili_gen extras 拉起 B 站，此处截获 launcher Activity 的 onCreate
-     * （冷启动）与 onNewIntent（运行中重投递），解析后写入宿主自有
-     * bili_tamer_host.conf（gen 协议保证此后每次启动首选且陈旧副本不反盖），
-     * 并热替换内存配置（词表等即时生效）。
+     * 配置投递的两条腿：
+     *  ① 启动 Intent 截获：设置页带 bili_conf/bili_gen/bili_nonce 拉起宿主，此处截获
+     *     launcher Activity 的 onCreate（冷启动）与 onNewIntent（运行中重投递），解析后
+     *     写入宿主自有 bili_tamer_host.conf（gen 协议保证此后每次启动首选且陈旧副本不反盖），
+     *     并热替换内存配置；
+     *  ② 回前台重读：挂 onResume，按同一把代次尺子从磁盘重读。ROM 拦掉跨应用启动时
+     *     ①整条不工作，而②不依赖我们拉起任何东西——root/开发通道写下的 conf 也因此
+     *     不再需要杀进程冷启动才生效。
+     * 两条腿应用成功后都回一条显式广播（ACTION_CONF_ACK）给设置页；这一步以前是静默的：
+     * 拉起被吞、写盘被拒，用户侧只剩「设置不生效」一句，看不出断在哪一环。
      */
     private void installConfDelivery(ClassLoader cl) {
         final String actCls = "tv.danmaku.bili.MainActivityV2"; // resolve-activity 实测 launcher
@@ -265,16 +276,30 @@ public class MainHook extends XposedModule implements HookApi {
             Class<?> a = load(cl, actCls);
             Method onCreate = null;
             Method onNewIntent = null;
+            Method onResume = null;
             for (Class<?> k = a; k != null && k != Object.class; k = k.getSuperclass()) {
+                String kn = k.getName();
+                // 三条腿都只在宿主自己包名空间里找：走到 android.app.Activity 那一层
+                // 就等于给全进程每个 Activity 挂回调，范围与代价都不是该有的样子。
+                if (!kn.startsWith("tv.danmaku.") && !kn.startsWith("com.bilibili.")) {
+                    break;
+                }
                 if (onCreate == null) {
                     try { onCreate = k.getDeclaredMethod("onCreate", android.os.Bundle.class); } catch (Throwable ignored) {}
                 }
                 if (onNewIntent == null) {
                     try { onNewIntent = k.getDeclaredMethod("onNewIntent", android.content.Intent.class); } catch (Throwable ignored) {}
                 }
-                if (onCreate != null && onNewIntent != null) {
+                if (onResume == null) {
+                    try { onResume = k.getDeclaredMethod("onResume"); } catch (Throwable ignored) {}
+                }
+                if (onCreate != null && onNewIntent != null && onResume != null) {
                     break;
                 }
+            }
+            if (onCreate == null || onNewIntent == null) {
+                warn("conf delivery: launch-intent leg incomplete (onCreate="
+                        + (onCreate != null) + ", onNewIntent=" + (onNewIntent != null) + ")");
             }
             XposedInterface.Hooker onC = new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
@@ -288,6 +313,13 @@ public class MainHook extends XposedModule implements HookApi {
                 @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                     Object r = chain.proceed();
                     deliver(chain.getThisObject(), chain.getArg(0));
+                    return r;
+                }
+            };
+            XposedInterface.Hooker onR = new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object r = chain.proceed();
+                    reloadFromDisk(chain.getThisObject());
                     return r;
                 }
             };
@@ -307,12 +339,31 @@ public class MainHook extends XposedModule implements HookApi {
                         .intercept(onN));
                 info("conf delivery: onNewIntent hooked");
             }
+            if (onResume != null) {
+                deoptimize(onResume);
+                hookHandles.add(hook((java.lang.reflect.Executable) onResume)
+                        .setPriority(Integer.MAX_VALUE)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(onR));
+                info("conf delivery: onResume hooked -> " + onResume.getDeclaringClass().getName());
+            } else {
+                warn("conf delivery: no host-level onResume on " + actCls + ", resume reload unavailable");
+            }
         } catch (Throwable t) {
             error("conf delivery install failed", t);
         }
     }
 
-    /** 解析投递 extras → 代次比较 → 落盘宿主副本 → 热替换内存配置。 */
+    /** 当前生效代次：Intent 通道与文件通道共用，取最大（旧通道不得倒退覆盖新配置）。 */
+    private long currentGen() {
+        long g = BiliConfig.sConfGen;
+        if (config != null && config.overrideGen > g) {
+            g = config.overrideGen;
+        }
+        return g;
+    }
+
+    /** 解析投递 extras → 代次比较 → 落盘宿主副本 → 热替换内存配置 → 回执。 */
     private void deliver(Object actObj, Object intentObj) {
         try {
             if (!(intentObj instanceof android.content.Intent)) {
@@ -324,20 +375,33 @@ public class MainHook extends XposedModule implements HookApi {
                 return;
             }
             long gen = it.getLongExtra("bili_gen", 0L);
+            long nonce = it.getLongExtra("bili_nonce", 0L);
+            // 先取当前生效代次，再解析：比较的基准必须是「采纳之前」的状态。
+            long current = currentGen();
             BiliConfig incoming = BiliConfig.fromConfText(conf, gen);
             if (incoming == null) {
                 warn("conf delivery: parse failed");
                 return;
             }
-            long current = config != null ? config.overrideGen : 0L;
             if (incoming.overrideGen <= current) {
                 info("conf delivery: stale (incoming=" + incoming.overrideGen
                         + " current=" + current + ")");
+                // 仍然回执：宿主确实处在这个代次（可能是文件通道先到了），
+                // 界面把它报成「没投递」会让人反复划掉重开。
+                sendConfAck(actObj, nonce, current);
                 return;
             }
             try {
-                java.io.File f = new java.io.File("/data/data/" + BiliConfig.TARGET_PKG
-                        + "/files/" + BiliConfig.HOST_CONF_NAME);
+                // 用宿主 Activity 自己的 files 目录：写死 /data/data/<pkg> 在分身/工作资料
+                // 里指向的是 user 0 的目录，那个进程根本没权限写，读也读不回。
+                java.io.File dir = null;
+                if (actObj instanceof android.app.Activity) {
+                    try { dir = ((android.app.Activity) actObj).getFilesDir(); } catch (Throwable ignored) {}
+                }
+                java.io.File f = dir != null
+                        ? new java.io.File(dir, BiliConfig.HOST_CONF_NAME)
+                        : new java.io.File("/data/data/" + hostPackage + "/files/"
+                                + BiliConfig.HOST_CONF_NAME);
                 java.io.FileOutputStream fos = new java.io.FileOutputStream(f);
                 fos.write(incoming.toNormalizedText(incoming.overrideGen).getBytes("UTF-8"));
                 fos.getFD().sync();
@@ -347,9 +411,51 @@ public class MainHook extends XposedModule implements HookApi {
                 warn("conf host write failed: " + t);
             }
             this.config = incoming;
+            BiliConfig.sConfSource = "intent gen=" + incoming.overrideGen;
+            BiliConfig.sConfGen = incoming.overrideGen;
             info("conf delivered via launch intent, gen=" + incoming.overrideGen);
+            sendConfAck(actObj, nonce, incoming.overrideGen);
         } catch (Throwable t) {
             warn("conf delivery failed: " + t);
+        }
+    }
+
+    /**
+     * 回前台重读磁盘 conf：只接受代次严格更新的副本，读到旧件时把来源读数还原，
+     * 免得日志/回执把「读过的旧文件」报成当前生效来源。
+     */
+    private void reloadFromDisk(Object actObj) {
+        try {
+            long before = currentGen();
+            String prevSrc = BiliConfig.sConfSource;
+            long prevGen = BiliConfig.sConfGen;
+            BiliConfig fresh = BiliConfig.loadForHook(hostPackage);
+            if (fresh == null || BiliConfig.sConfGen <= before) {
+                BiliConfig.sConfSource = prevSrc;
+                BiliConfig.sConfGen = prevGen;
+                return;
+            }
+            this.config = fresh;
+            info("conf reloaded on resume: " + BiliConfig.sConfSource);
+            sendConfAck(actObj, 0L, BiliConfig.sConfGen);
+        } catch (Throwable t) {
+            warn("conf reload failed: " + t);
+        }
+    }
+
+    /** 投递回执（Hook→模块，显式 setPackage）：nonce=0 表示这条是回前台自发重读的报告。 */
+    private void sendConfAck(Object actObj, long nonce, long gen) {
+        try {
+            if (!(actObj instanceof android.content.Context)) {
+                return;
+            }
+            android.content.Intent i = new android.content.Intent(BiliConfig.ACTION_CONF_ACK);
+            i.setPackage(BiliConfig.MODULE_PKG);
+            i.putExtra("gen", gen);
+            i.putExtra("nonce", nonce);
+            i.putExtra("src", BiliConfig.sConfSource);
+            ((android.content.Context) actObj).sendBroadcast(i);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -715,6 +821,13 @@ public class MainHook extends XposedModule implements HookApi {
         BiliConfig c = config;
         return c != null && c.get(BiliConfig.KEY_PLAYER_NO_ACTIVITY_META,
                 BiliConfig.defaultValueOf(BiliConfig.KEY_PLAYER_NO_ACTIVITY_META));
+    }
+
+    @Override
+    public boolean isPlayerNoUnderAdEnabled() {
+        BiliConfig c = config;
+        return c != null && c.get(BiliConfig.KEY_PLAYER_NO_UNDER_AD,
+                BiliConfig.defaultValueOf(BiliConfig.KEY_PLAYER_NO_UNDER_AD));
     }
 
     // ===== 日志 =====

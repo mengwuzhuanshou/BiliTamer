@@ -6,9 +6,10 @@ import java.util.Map;
 
 /**
  * BiliTamer 开关配置：与设置界面(SettingsActivity)共用同一份 SharedPreferences。
- * Hook 侧（libxposed）按 conf 文件读取：最高优先级为 B 站 App 数据目录下的
- * /data/data/com.bilibili.app.in/files/bili_tamer.conf（SettingsActivity 通过 root
- * 同步写入，B 站进程可读），其次 /data/local/tmp 副本。
+ * Hook 侧（libxposed）按 conf 文件读取：最高优先级为宿主自己 files 目录下的
+ * bili_tamer_host.conf（由启动 Intent 投递后 Hook 落盘），其后再找 root 写的
+ * bili_tamer.conf 与 /data/local/tmp 兜底副本；所有路径按当前进程的用户区拼，
+ * 见 {@link #loadForHook(String)}。
  */
 public final class BiliConfig {
     public static final String MODULE_PKG = "com.tamer.bili";
@@ -24,8 +25,16 @@ public final class BiliConfig {
         return TARGET_PKG.equals(pkg) || DOMESTIC_PKG.equals(pkg);
     }
     public static final String CONF_NAME = "bili_tamer.conf";
+    /**
+     * 投递回执的广播 action（Hook 进程 → 模块设置页）。显式 setPackage 到模块，
+     * 只带 gen/nonce/来源读数，不含任何用户数据；伪造它只能骗过设置页的诊断文案，
+     * 不影响宿主行为，故不设自定义权限（权限要求会把这条通道变成又一次跨应用查询）。
+     */
+    public static final String ACTION_CONF_ACK = "com.tamer.bili.CONF_ACK";
     /** 实际生效的配置来源（日志排查用） */
     public static volatile String sConfSource = "defaults";
+    /** 当前生效配置的代次（文件通道与 Intent 通道共用这一把尺子）。 */
+    public static volatile long sConfGen = 0L;
     /** 最近一次读到的本地 conf 全路径（仅日志诊断）。 */
     private static volatile String sLastConfPath = "";
 
@@ -100,6 +109,13 @@ public final class BiliConfig {
     // ===== 播放器 =====
     /** 干掉云视听小电视：清空弹幕回包（DmViewReply）里的 activity_meta 活动浮层。 */
     public static final String KEY_PLAYER_NO_ACTIVITY_META = "player_no_activity_meta";
+    /** 干掉详情页的广告位：播放器下方商品卡（{@code ViewReply.cm_} 的 {@code sourceContentItem*}）、
+     *  简介区楼层广告，以及简介区「视频提及」里的游戏推广卡（{@code Module.videoMentions}，只摘
+     *  {@code MENTION_TYPE_GAME}，UP 自己的课程/充电/手办链接不动）。
+     *  出厂默认**开**：这些槽位只在国内版排期里，是身份改写让服务端把客户端当国内版才下发的，
+     *  属于本模块引入的回归，不是宿主原生长相（与其余「删界面」类开关默认相反）。
+     *  三格对照装机已证（同一条稿件，改身份才下发；荣耀 2026-10-28，细节见 {@link com.tamer.bili.hooks.ViewCmAdHooks} 类头）。 */
+    public static final String KEY_PLAYER_NO_UNDER_AD = "player_no_under_ad";
 
     // ===== 调试 =====
     public static final String KEY_DEBUG_ALIVE = "debug_alive_marker";
@@ -134,6 +150,7 @@ public final class BiliConfig {
         KEY_FEED_NO_PORTRAIT,
         KEY_FEED_NO_LARGE_CARD,
         KEY_PLAYER_NO_ACTIVITY_META,
+        KEY_PLAYER_NO_UNDER_AD,
         KEY_LISTEN_PAUSE_AFTER_END,
         KEY_HIDE_TRIPLE,
         KEY_HIDE_VOTE,
@@ -165,6 +182,7 @@ public final class BiliConfig {
         if (KEY_FEED_NO_PORTRAIT.equals(key)) return false;
         if (KEY_FEED_NO_LARGE_CARD.equals(key)) return false;
         if (KEY_PLAYER_NO_ACTIVITY_META.equals(key)) return false;
+        if (KEY_PLAYER_NO_UNDER_AD.equals(key)) return true;
         if (KEY_DEBUG_ALIVE.equals(key)) return false;
         if (KEY_VERBOSE.equals(key)) return false;
         if (KEY_PROBE.equals(key)) return false;
@@ -196,44 +214,91 @@ public final class BiliConfig {
      * Hook 侧加载（LineTamer v1.6.1 同款代次协议，最小权限）：
      * 读序 host-conf → module 副本 → B 站 files → /data/local/tmp，
      * 每来源带 conf_gen 代次：gen 大者胜、同代次先到先得；全无代次（旧格式）
-     * 沿用静态顺序，兼容旧副本。XSharedPreferences 通道不采用（LSPosed 2.2.0
+     * 沿用静态顺序，兼容旧副本。/data/local/tmp 世界可写，不算可信通道：先要求
+     * {@link #CONF_KEY} 防伪键匹配（缺键或不等直接当垃圾），过了这一关也只在
+     * 没有任何可信副本压得住它（可信件缺失或代次更低）时才采纳，否则一律让位。
+     * XSharedPreferences 通道不采用（LSPosed 2.2.0
      * 标记废弃、2.3.0 移除）。LAST_CONF_SRC 带 confSrc= 便于诊断
      * （设置页开关可能根本到不了目标进程——HMT/QQTamer §13 教训）。
+     *
+     * 路径按**当前进程所在用户区**拼（uid/100000 即 Android 用户号），宿主包名由
+     * 调用方传入：写死 user 0 + 写死国际版包名时，宿主跑在应用分身 / 安全文件夹 /
+     * 工作资料（user 10、999…）会让读写两边同时错位，root 兜底写的也还是 user 0
+     * 那份——表现就是「改了不生效、给了 root 也没用」。旧字面路径继续留作候选，
+     * 兼容既有副本。
      */
-    public static BiliConfig loadForHook() {
-        java.util.List<String> paths = new java.util.ArrayList<String>();
+    public static BiliConfig loadForHook(String hostPkg) {
+        String u = "/data/user/" + (android.os.Process.myUid() / 100000);
+        java.util.List<String[]> cand = new java.util.ArrayList<String[]>();
         // ⓪ 宿主自有副本：设置页经启动 Intent 投递后由 Hook 写入宿主 files
-        paths.add("/data/user/0/" + TARGET_PKG + "/files/" + HOST_CONF_NAME);
-        // ①② 模块自有两份（设置页随保存实时重写，永远最新）
-        paths.add("/data/user/0/" + MODULE_PKG + "/files/" + CONF_NAME);
-        paths.add("/data/user/0/" + MODULE_PKG + "/shared_prefs/" + CONF_NAME);
-        // ③ B 站 files（root 写，仅开发兜底）
-        paths.add("/data/data/" + TARGET_PKG + "/files/" + CONF_NAME);
-        // ④ /data/local/tmp（root 写，仅开发兜底，陈旧风险最高）
-        paths.add("/data/local/tmp/" + CONF_NAME);
+        cand.add(new String[]{u + "/" + hostPkg + "/files/" + HOST_CONF_NAME, "host-conf"});
+        cand.add(new String[]{"/data/user/0/" + hostPkg + "/files/" + HOST_CONF_NAME, "host-conf"});
+        cand.add(new String[]{"/data/data/" + hostPkg + "/files/" + HOST_CONF_NAME, "host-conf"});
+        // ①② 模块自有两份（设置页随保存实时重写，永远最新；跨 uid 读不到属正常）
+        cand.add(new String[]{u + "/" + MODULE_PKG + "/files/" + CONF_NAME, "module-files-conf"});
+        cand.add(new String[]{u + "/" + MODULE_PKG + "/shared_prefs/" + CONF_NAME, "module-prefs-conf"});
+        // ③ 宿主 files（root 写，仅开发兜底）
+        cand.add(new String[]{u + "/" + hostPkg + "/files/" + CONF_NAME, "files-conf"});
+        cand.add(new String[]{"/data/data/" + hostPkg + "/files/" + CONF_NAME, "files-conf"});
+        // ④ /data/local/tmp：root/shell 都能写、世界可读，不是可信通道，单独降档处理
+        cand.add(new String[]{"/data/local/tmp/" + CONF_NAME, "tmp-conf", "untrusted"});
         ParsedConf best = null;
         String bestName = null;
-        for (int i = 0; i < paths.size(); i++) {
-            ParsedConf p = parseConfPath(paths.get(i));
+        ParsedConf tmp = null;
+        for (int i = 0; i < cand.size(); i++) {
+            ParsedConf p = parseConfPath(cand.get(i)[0]);
             if (p == null) {
                 continue;
             }
-            if (best == null || (p.gen > 0 && p.gen > best.gen)) {
-                best = p;
-                bestName = confSrcName(i);
+            boolean trusted = cand.get(i).length < 3;
+            if (trusted) {
+                if (best == null || (p.gen > 0 && p.gen > best.gen)) {
+                    best = p;
+                    bestName = cand.get(i)[1];
+                }
+            } else if (!CONF_KEY.equals(p.key)) {
+                // 世界可写的那一档：防伪键不匹配（含没这一行）就当垃圾，连「压不住时才用」
+                // 的资格都不给。可信通道（模块/宿主 files、启动 Intent）不查这把键，
+                // 免得既有副本因为没这行而集体失效。
+                continue;
+            } else if (tmp == null || (p.gen > 0 && p.gen > tmp.gen)) {
+                tmp = p;
             }
+        }
+        // tmp 只在「没有任何可信副本压得住它」时才采纳：投递链路通则用不着它，
+        // 三星那种跨应用启动被拦、只剩 root/shell 写 tmp 的场景照样能救活。
+        // 同代次算可信通道赢（真机可能出现同一份文件被复制到两处的情况）。
+        if (tmp != null && (best == null || tmp.gen > best.gen)) {
+            best = tmp;
+            bestName = "tmp-conf";
         }
         if (best != null) {
             sConfSource = bestName + " gen=" + best.gen;
+            sConfGen = best.gen;
             sLastConfPath = best.path;
             return new BiliConfig(best.map);
         }
         sConfSource = "defaults";
+        sConfGen = 0L;
         return new BiliConfig(new HashMap<String, Object>());
     }
 
     public static final String HOST_CONF_NAME = "bili_tamer_host.conf";
     public static final String KEY_CONF_GEN = "conf_gen";
+    /** conf 里的防伪键行键名（不是功能开关，故不进 {@link #ALL_KEYS}）。 */
+    public static final String KEY_CONF_KEY = "conf_key";
+    /**
+     * conf 防伪键：编译进模块 APK，写侧（{@code ConfSync.kvConfText}）随 conf 落盘，
+     * 读侧只对 {@code /data/local/tmp/} 那一份要求匹配。
+     *
+     * 为什么需要它：/data/local/tmp 世界可写，任何 root/shell 都能塞进一份高代次 conf，
+     * 光靠「可信通道压得住才让位」挡不住「可信件缺失时的高代次伪造」。加这把键之后，
+     * 伪造者必须先知道这个常量。
+     * 强度上限要诚实：它编译在**公开 APK** 里，反解我们的发布件就能拿到，所以它挡住的是
+     * 「随手写个 tmp 文件抢配置」，挡不住「专门冲着我们模块来的人」。真要 per-install
+     * 私钥得让 Hook 侧拿得到模块私有 SP，那需要另开一条投递腿，当前不做。
+     */
+    public static final String CONF_KEY = "bilitamer.k1.9d3f7c4a2e";
 
     public boolean get(String key, boolean def) {
         Object v = map.get(key);
@@ -258,19 +323,13 @@ public final class BiliConfig {
         final Map<String, Object> map;
         final long gen;
         final String path;
-        ParsedConf(Map<String, Object> map, long gen, String path) {
+        final String key;
+        ParsedConf(Map<String, Object> map, long gen, String path, String key) {
             this.map = map;
             this.gen = gen;
             this.path = path;
+            this.key = key;
         }
-    }
-
-    private static String confSrcName(int i) {
-        if (i == 0) return "host-conf";
-        if (i == 1) return "module-files-conf";
-        if (i == 2) return "module-prefs-conf";
-        if (i == 3) return "files-conf";
-        return "tmp-conf";
     }
 
     /** 解析单个 conf 副本：kv 行 + conf_gen 代次行（BOM 去除；非已知类型键跳过）。 */
@@ -300,6 +359,7 @@ public final class BiliConfig {
             }
             Map<String, Object> m = new HashMap<String, Object>();
             long gen = 0L;
+            String confKey = null;
             for (String line : text.split("\\r?\\n")) {
                 int i = line.indexOf('=');
                 if (i <= 0) {
@@ -309,6 +369,10 @@ public final class BiliConfig {
                 String v = line.substring(i + 1).trim();
                 if (KEY_CONF_GEN.equals(k)) {
                     try { gen = Long.parseLong(v); } catch (Throwable ignored2) {}
+                    continue;
+                }
+                if (KEY_CONF_KEY.equals(k)) {
+                    confKey = v; // 防伪键：不进功能表，只交给读侧的 untrusted 档校验
                     continue;
                 }
                 if (KEY_DEV_OVERRIDE.equals(k)) {
@@ -335,7 +399,7 @@ public final class BiliConfig {
             if (m.isEmpty()) {
                 return null;
             }
-            return new ParsedConf(m, gen, path);
+            return new ParsedConf(m, gen, path, confKey);
         } catch (Throwable ignored) {
             return null;
         }
@@ -354,7 +418,9 @@ public final class BiliConfig {
         }
         BiliConfig c = new BiliConfig(p.map);
         c.overrideGen = p.gen > 0 ? p.gen : gen;
-        sConfSource = "intent gen=" + c.overrideGen;
+        // 纯工厂：不碰 sConfSource/sConfGen。这两个静态是「当前生效来源」的读数，
+        // 调用方拿它做代次比较，若在比较前就写成传入代次，第一次投递会把自己
+        // 判成 stale 丢掉（1.9.8 装机日志抓到的回归）。采纳时才由调用方盖章。
         return c;
     }
 

@@ -41,8 +41,23 @@ import io.github.libxposed.api.XposedInterface;
  *       .IjkMediaPlayerItem.handleDashBaseUrl(String)} 的返回值——它就是
  *       {@code mediaAssetToJson()} 里每个流的 base_url，native 照着取流；
  *       backup_url 原样保留，代理失效时 native 自己回落真 CDN。</li>
- *   <li>C 离线下载：{@code SingleSpec} 20 参构造器 arg0——build/DB 还原/换签拷贝
- *       全部途经此处。</li>
+ *   <li>C 离线下载（旧 okdownloader 栈兜底）：{@code SingleSpec} 20 参构造器 arg0——
+ *       build/DB 还原/换签拷贝全部途经此处。</li>
+ *   <li>C 离线下载（KDownloader 栈，6.6.0 与 6.7.1 真机同源）：下载器实现类
+ *       {@code kntr.base.downloader.KDownloaderImpl} 上由它所实现的唯一
+ *       {@code kntr.base.downloader.*} 接口声明、返回该接口嵌套 builder 的
+ *       两个 enqueue（{@code a(String×4)} / {@code b(String×3)}）的 arg0——
+ *       接口名按角色取而不写死：6.7.1 是 {@code c}/{@code c$b}，6.6.0 是
+ *       {@code b}/{@code b$b}。反汇编链路：{@code KDownloaderImpl.a} 把 arg0
+ *       交给 {@code j.<init>} 第一参 → {@code j.build()} 里 {@code new n(task)}
+ *       的首参取 {@code j.a}，同处还用它拼 {@code .temp} 落盘路径，
+ *       所以 arg0 就是真取流地址。</li>
+ *   <li>C 已被真机证伪的两个 6.7.1 候选，留作旧宿主兜底：
+ *       {@code KDownloadService.onStartCommand} 的 {@code "url"} extra（该服务
+ *       dumpsys 显示是 bind 常驻、起任务不走 startService，新下一集后 :download
+ *       零条 hook 日志）；以及 spec 构造器 {@code xf0.n(String,String,c)}
+ *       （51MB 真实下载期间同样零触发，它的 4 个 new 点 {@code xf0.t.a/b} +
+ *       {@code ProcessService.p(TaskSpec)}×2 属于 okdownloader 旧控制面）。</li>
  *   <li>D 跨进程控制面：{@code ProcessService$a} 的 cancel/pause/queryProgress(String)
  *       改写为与 C 相同的形态（否则主进程拿原始 url 找不到已改写的 spec）；
  *       {@code ProcessService} 的事件回传（b/c/e/h/n/s/u）反向 unwrap 成原始 url，
@@ -68,6 +83,9 @@ public final class AccelHooks {
 
     /** 宿主私有缓存目录名（files/ 下，主进程与 :download 共用同一份）。 */
     private static final String CACHE_DIR_NAME = "bili_tamer_accel";
+
+    /** 6.7.1 BiliDownloader 启动 Intent 里放下载地址的 extra 键（dex 反汇编核实）。 */
+    private static final String EXTRA_URL = "url";
 
     /** 旧管线里同步读写 bundle "url" 的 onNativeInvoke case。 */
     private static final int CASE_LEGACY_1 = 131075;
@@ -169,8 +187,10 @@ public final class AccelHooks {
         installAddDashStreamHook();
         installLegacyBinderHook();
         installOnlineDashHook();
+        // enqueue 帧不保证只在 :download（6.7.1 待真机定论），两进程都挂；
+        // rewriteMedia 幂等，跨进程重投递只会按当前端口重挂一次。
+        installOfflineUrlHook();
         if (downloadProcess) {
-            installSingleSpecHook();
             installRemoteVerbHooks();
             installEventUnwrapHooks();
         }
@@ -670,7 +690,214 @@ public final class AccelHooks {
         }
     }
 
-    // ===== 锚点 C：SingleSpec 构造器 arg0（离线下载最后 Java 帧）=====
+    // ===== 锚点 C：离线下载 URL 的最后一个 Java 帧 =====
+    // 6.7.1 真机证据：任务经 bind 常驻的 KDownloadService 投递，onStartCommand(Intent,..)
+    // 一次都没被调用过（改 url extra 的锚点挂上后零日志）；带 URL 的必经帧是实现类
+    // KDownloaderImpl 的 enqueue a/b —— 反汇编坐实 a/b 的首个 String 一路是
+    // j(=spec builder).a → j.build() 里 new n(task) 的第一参，即真取流地址。
+    // 旧宿主兜底：Intent、xf0.n（6.7.1 已被真机证伪）、SingleSpec（旧 okdownloader 栈）。
+    private void installOfflineUrlHook() {
+        final boolean enqueue = installKDownloaderEnqueueHook();
+        // 真机证明 onStartCommand 不参与投递，所以它只作旁路兜底，不能挡掉后面的锚点。
+        installKDownloadServiceUrl();
+        if (enqueue) {
+            return;
+        }
+        if (installBiliDownloaderSpec()) {
+            return;
+        }
+        installSingleSpecHook();
+    }
+
+    /**
+     * KDownloader 栈的离线落点：实现类所下载的器接口里「首个 String 参数、
+     * 返回该接口自己的嵌套 builder」的两个 enqueue，arg0 就是 URL。
+     * 接口按角色找（实现类唯一 {@code kntr.base.downloader.*} 接口），
+     * 所以 6.6.0 的 {@code b}/{@code b$b} 与 6.7.1 的 {@code c}/{@code c$b} 同一份代码。
+     */
+    private boolean installKDownloaderEnqueueHook() {
+        try {
+            final Class<?> impl = api.load(cl, "kntr.base.downloader.KDownloaderImpl");
+            Class<?> iface = null;
+            for (Class<?> k : impl.getInterfaces()) {
+                if (k.isInterface() && k.getName().startsWith("kntr.base.downloader.")) {
+                    iface = k;
+                    break;
+                }
+            }
+            if (iface == null) {
+                api.debug("accel: KDownloaderImpl has no downloader iface, anchor off");
+                return false;
+            }
+            int hooked = 0;
+            for (Method im : iface.getDeclaredMethods()) {
+                Class<?>[] ps = im.getParameterTypes();
+                Class<?> rt = im.getReturnType();
+                if (ps.length < 1 || ps[0] != String.class
+                        || !rt.isInterface() || rt.getEnclosingClass() != iface) {
+                    continue;
+                }
+                final Method m;
+                try {
+                    m = impl.getDeclaredMethod(im.getName(), ps);
+                } catch (Throwable t) {
+                    api.debug("accel: downloader enqueue not declared: " + im);
+                    continue;
+                }
+                api.deoptimize(m);
+                final String label = "accel: downloader enqueue " + im.getName();
+                api.addHook(label, m, new XposedInterface.Hooker() {
+                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        Object a0 = chain.getArg(0);
+                        if (a0 instanceof String) {
+                            String url = (String) a0;
+                            String next = rewriteMedia(url, null);
+                            if (!next.equals(url)) {
+                                Object[] copy = chain.getArgs().toArray();
+                                copy[0] = next;
+                                return chain.proceed(copy);
+                            }
+                        }
+                        return chain.proceed();
+                    }
+                });
+                hooked++;
+            }
+            if (hooked == 0) {
+                api.debug("accel: no " + iface.getName()
+                        + " enqueue matches (String..)->nested builder");
+            }
+            return hooked > 0;
+        } catch (Throwable t) {
+            api.debug("accel: downloader enqueue anchor unavailable: " + t);
+        }
+        return false;
+    }
+
+    /**
+     * 旁路兜底：下载服务收到启动 Intent 时改 url extra。真机证明 6.7.1 起任务不走
+     * startService（bind 常驻，改这里零触发），所以它不作为链路的终点。
+     * 只认角色（Service 子类 + onStartCommand(Intent,int,int)->int 自己声明），
+     * 类名换了也照挂；形状不过就落回 spec 构造器候选。
+     */
+    private boolean installKDownloadServiceUrl() {
+        try {
+            final Class<?> svc = api.load(cl, "kntr.base.downloader.KDownloadService");
+            boolean isService = false;
+            for (Class<?> k = svc; k != null; k = k.getSuperclass()) {
+                if (k.getName().equals("android.app.Service")) {
+                    isService = true;
+                    break;
+                }
+            }
+            if (!isService) {
+                api.debug("accel: KDownloadService is not a Service, anchor off");
+                return false;
+            }
+            Method m = null;
+            for (Method mm : svc.getDeclaredMethods()) {
+                if (!mm.getName().equals("onStartCommand")) continue;
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length == 3 && ps[0] == android.content.Intent.class
+                        && ps[1] == int.class && ps[2] == int.class
+                        && mm.getReturnType() == int.class) {
+                    m = mm;
+                    break;
+                }
+            }
+            if (m == null) {
+                api.debug("accel: KDownloadService.onStartCommand(Intent,int,int) absent");
+                return false;
+            }
+            api.deoptimize(m);
+            final String label = "accel: KDownloadService onStartCommand";
+            api.addHook(label, m, new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object a0 = chain.getArg(0);
+                    if (a0 instanceof android.content.Intent) {
+                        android.content.Intent in = (android.content.Intent) a0;
+                        String url = in.getStringExtra(EXTRA_URL);
+                        if (url != null) {
+                            String next = rewriteMedia(url, null);
+                            if (!next.equals(url)) {
+                                in.putExtra(EXTRA_URL, next);
+                            }
+                        }
+                    }
+                    return chain.proceed();
+                }
+            });
+            return true;
+        } catch (Throwable t) {
+            api.debug("accel: KDownloadService anchor unavailable: " + t);
+        }
+        return false;
+    }
+
+    /** 6.7.1 新栈：spec = (String url, String tag, 下载器接口)，下载器接口 = KDownloaderImpl 实现的接口。 */
+    private boolean installBiliDownloaderSpec() {
+        try {
+            Class<?> impl = api.load(cl, "kntr.base.downloader.KDownloaderImpl");
+            Class<?>[] downloaderIfaces = impl.getInterfaces();
+            for (String cn : new String[]{"xf0.n"}) {
+                Class<?> spec;
+                try {
+                    spec = api.load(cl, cn);
+                } catch (Throwable t) {
+                    api.debug("accel: downloader spec candidate " + cn + " not loadable: " + t);
+                    continue;
+                }
+                Constructor<?> found = null;
+                for (Constructor<?> c : spec.getDeclaredConstructors()) {
+                    Class<?>[] ps = c.getParameterTypes();
+                    if (ps.length != 3 || ps[0] != String.class || ps[1] != String.class) {
+                        continue;
+                    }
+                    for (Class<?> iface : downloaderIfaces) {
+                        if (iface.isAssignableFrom(ps[2])) {
+                            found = c;
+                            break;
+                        }
+                    }
+                    if (found != null) {
+                        break;
+                    }
+                }
+                if (found == null) {
+                    api.debug("accel: downloader spec " + cn
+                            + " has no (String,String,<KDownloaderImpl iface>) ctor");
+                    continue;
+                }
+                hookOfflineCtor("accel: " + cn + " ctor", found);
+                return true;
+            }
+        } catch (Throwable t) {
+            api.debug("accel: BiliDownloader spec unavailable: " + t);
+        }
+        return false;
+    }
+
+    private void hookOfflineCtor(String label, Constructor<?> ctor) {
+        api.addHookCtor(label, ctor, new XposedInterface.Hooker() {
+            @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                Object arg0 = chain.getArg(0);
+                if (arg0 instanceof String) {
+                    String url = (String) arg0;
+                    String next = rewriteMedia(url, null);
+                    if (!next.equals(url)) {
+                        List<Object> args = chain.getArgs();
+                        Object[] copy = args.toArray();
+                        copy[0] = next;
+                        chain.proceed(copy);
+                        return null;
+                    }
+                }
+                chain.proceed();
+                return null;
+            }
+        });
+    }
+
     private void installSingleSpecHook() {
         try {
             Class<?> spec = api.load(cl,
@@ -684,27 +911,10 @@ public final class AccelHooks {
                 }
             }
             if (found == null) {
-                api.warn("accel: SingleSpec 20-arg ctor not found (shape drift?)");
+                api.warn("accel: offline spec not found (xf0.n / SingleSpec 20-arg ctor)");
                 return;
             }
-            api.addHookCtor("accel: SingleSpec ctor", found, new XposedInterface.Hooker() {
-                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                    Object arg0 = chain.getArg(0);
-                    if (arg0 instanceof String) {
-                        String url = (String) arg0;
-                        String next = rewriteMedia(url, null);
-                        if (!next.equals(url)) {
-                            List<Object> args = chain.getArgs();
-                            Object[] copy = args.toArray();
-                            copy[0] = next;
-                            chain.proceed(copy);
-                            return null;
-                        }
-                    }
-                    chain.proceed();
-                    return null;
-                }
-            });
+            hookOfflineCtor("accel: SingleSpec ctor", found);
         } catch (Throwable t) {
             api.warn("accel: SingleSpec anchor unavailable: " + t);
         }

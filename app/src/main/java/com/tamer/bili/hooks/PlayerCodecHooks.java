@@ -155,8 +155,9 @@ public final class PlayerCodecHooks {
         return miss.toString().trim();
     }
 
-    /** hook 返回 fnval 的类方法（int c() 与 long d()，direct private 实例方法，
-     *  经单例字段 a 调用）。6.3.0: FG1.b；6.4.0: GI1.e；6.5.0: kJ1.a；6.6.0: aK1.a。
+    /** hook 返回 fnval 的类方法（int c() 与 long d()）。6.3.0: FG1.b；6.4.0: GI1.e；
+     *  6.5.0: kJ1.a；6.6.0: aK1.a；6.7.1: wL1.a（a/b/c/d 四方法这版编成了 static，
+     *  形状校验只看方法名+返回类型+三个 static 字段，不区分静不静态，照样命中）。
      *  四类同构：单例 a、I 缓存 c、J 缓存 d、a()Z/b()Z 懒加载能力位、c()I/d()J。
      *  （6.5.0 jadx 实证 c() 仍含 512/2048/65536 fnval 位运算。）
      *  6.6.0 定位置证（按形状全 dex 反查，两版都唯一命中）：
@@ -164,12 +165,15 @@ public final class PlayerCodecHooks {
      *  同时 6.6.0 的 FG1.b / GI1.e / kJ1.a 已被 R8 复用成无关类（菜单工具 / Runnable /
      *  lazy 持有者）——所以候选必须过 isFnvalHolder 形状校验，光看类名会把 hook
      *  挂到无关方法上（PITFALLS #16）。aK1.a.d() 里调 IjkCodecHelper.isH266SupportSoft，
-     *  c() 里调 IjkCpuInfo.getCpuName，与 soft_fnval/fnval 职责一致。 */
+     *  c() 里调 IjkCpuInfo.getCpuName，与 soft_fnval/fnval 职责一致。
+     *  6.7.1 同一形状全 dex 反查仍唯一命中（wL1.a），且方法体自证：c() 里
+     *  IjkCpuInfo.getCpuName + IjkCodecHelper.isHDRSupport/isH266SupportHard，
+     *  d() 里 IjkCodecHelper.isH266SupportSoft，日志 tag 就是真名 "IjkFnHelper"。 */
     private void installFnval() throws Throwable {
         Class<?> fg1b = null;
         String fnvalClsUsed = null;
         StringBuilder why = new StringBuilder();
-        for (String cn : new String[]{"aK1.a", "kJ1.a", "GI1.e", "FG1.b"}) {
+        for (String cn : new String[]{"wL1.a", "aK1.a", "kJ1.a", "GI1.e", "FG1.b"}) {
             try {
                 Class<?> c = api.load(cl, cn);
                 if (isFnvalHolder(c)) { fg1b = c; fnvalClsUsed = cn; break; }
@@ -181,7 +185,7 @@ public final class PlayerCodecHooks {
             }
         }
         if (fg1b == null) {
-            api.warn("codec: fnval class not found (aK1.a / kJ1.a / GI1.e / FG1.b)"
+            api.warn("codec: fnval class not found (wL1.a / aK1.a / kJ1.a / GI1.e / FG1.b)"
                     + " loader=" + cl + " why: " + why);
             return;
         }

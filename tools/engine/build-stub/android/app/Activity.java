@@ -8,6 +8,7 @@ import android.view.View;
 
 public class Activity extends Context {
     protected void onCreate(Bundle savedInstanceState) { }
+    protected void onDestroy() { }
     public void setContentView(View view) { }
     public void finish() { }
     public Intent getIntent() { return null; }

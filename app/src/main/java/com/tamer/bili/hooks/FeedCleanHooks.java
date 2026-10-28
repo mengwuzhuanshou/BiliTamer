@@ -479,7 +479,7 @@ public final class FeedCleanHooks {
 
     /**
      * 现场值域探针（整批只跑一次，与开关无关）：打出前 {@link #PROBE_CARDS} 张卡的
-     * {@code card_type/card_goto/up有无/desc值}，外加第一张卡的完整
+     * {@code card_type/card_goto/up有无/desc值/args.tname}，外加第一张卡的完整
      * {@code @SerializedName} 清单。
      *
      * 为什么必须有：①的 UGC 判据（{@code card_goto=="av"}）和②要清哪几个键都是静态
@@ -523,6 +523,7 @@ public final class FeedCleanHooks {
                     + "/" + FeedItems.readProp(args, "upId")
                     + " name(desc)=" + FeedItems.readJson(card, "desc")
                     + " uri=" + brief(FeedItems.readJson(card, "uri"))
+                    + " tname=" + FeedItems.readJson(args, "tname")
                     + " badges" + badgeValues(card));
         }
     }

@@ -35,7 +35,7 @@ jadx 的去混淆/别名会改写混淆名，照抄会 hook 到不存在的类�
 ## 4. KMP 身份头是 protobuf 字节手术，长度前缀要重建
 
 `x-bili-metadata-bin` / `x-bili-device-bin` 的 mobiApp 字段是 `tag + length(varint) + bytes`。
-`android_i`(9 字节) → `android`(7 字节) 必须重建数组并更新长度前缀；只有同长度才能原位覆盖。
+`android_i`(9 字节) → `android_hd`(10 字节) 必须重建数组并更新长度前缀；只有同长度才能原位覆盖。
 
 ## 5. REST 身份在 URL 查询参数里，不在 header
 
@@ -43,7 +43,8 @@ jadx 的去混淆/别名会改写混淆名，照抄会 hook 到不存在的类�
 只改 UA 或 metadata header 无效。6.4.0+ 空间页身份由页面专属拦截器
 `com.bilibili.app.comm.list.common.api.e.addCommonParam(Map)` 组装（6.6.0 也覆盖评论/列表 REST，
 类名里的“space”是误名），hook AFTER 改写 `mobi_app` 即可，签名在组装之后算。
-主页用 `mobi_app=android`，不要用 `android_hd`。
+**REST 主页/空间页**用 `mobi_app=android`，不要用 `android_hd`（这条只管 REST 查询串那一条链；
+moss 二进制头取 hd 见 §55，两条链各自独立取值）。
 
 ## 6. KMP 一元 RPC 的头来源是 header.b 拦截器
 
@@ -521,3 +522,133 @@ R8 会把 trivial getter 内联成字段访问，调用图上没有那个点，�
   多个文件，把一次缺文件放大成整台机器在任何视频里被降级。
 * 另一条设计张力（不是 bug）：节点一旦被降到队尾，正常播放几乎不会再拨它，于是「交付过字节就销账」
   那条恢复路径走不到，实际靠十分钟 TTL 自愈。想让恢复更灵敏，调 TTL 比加探测更划算。
+
+## 52. javac 不删输出类：删掉的匿名内部类照样打进 apk
+
+* 症状：删掉 `LiveBgHooks.installGateDump()` 重建后，`gate dump`、`onPlayerServiceEvent` 都从
+  `classes.dex` 里消失了，`livebg[gate]: w0=` 却还在——同一段代码的字符串一半没删干净。
+* 根因：`build/app_classes` 是增量目录，javac 只覆盖同名输出。匿名内部类的编号按源码里出现顺序排，
+  删掉一个方法就把 `LiveBgHooks$2`（探针的 `Hooker`）空出来，而旧文件还躺在目录里，被 d8 一起 dex 进包。
+  它是死代码（没人再 `new` 它），但会跟着 Release 发出去。
+* 判据两条：① 拿 apk 的 dex 字节 grep「这次删掉的字符串」，命中即残留；② 比对 `build/app_classes/**/*.class`
+  的 mtime，早于本次编译的就是旧件。**别看 apk 大小**——这一轮前后都是 160438 B，看着像没重建。
+* 修法：`tools/build_module.py` 编译前 `shutil.rmtree(build/app_classes)`。只改本项目的入口脚本，
+  `tools/engine/builder.py` 是和 QQ 共用的引擎，别为了这件事去动它。
+
+## 53. 宿主升级轮的验收顺序：总闸基线 → 开关对照 → 才允许说「环境问题」
+
+* 6.7.1 这轮在线取流停在 0 KB/s。先跑的对照是 `accel_enabled=false`，**这不算基线**：`ip_location_enabled`
+  默认 true，moss/grpc 那几枚钩子照挂。换成 `master_enabled=false` 并确认该 pid 零条 `hook installed` 之后，
+  一样 0 KB/s，才允许把结论写成网络/账号侧。
+* 「链路通不通」要一条与模块无关的读数：手机上 `curl -o /dev/null -w '%{http_code} %{time_total}'` 直连
+  `upos-sz-mirror*` 拿到 959/403、0.3 s 返回——403 是缺 Referer 与签名，不是超时，和「连不上」是两回事。
+* 抑制类开关的 OFF 腿必须配「值域探针照打」这一条：探针与开关无关，它证明解析出口这一批确实被走过，
+  `removed` 归零才是「关对了」而不是「钩子死了」。
+* 词表类功能（`feed_blocked_tnames`）的正证别猜分区名：把 `tname=` 搭在已有探针行末尾跑一轮，用现场值当
+  词表，`blocked 1 card(s) [植物大战僵尸]` 这一行才算同时验到 `getArgs()` 与 `@SerializedName` 两条读路径。
+
+## 54. 只在新宿主上验收 = 给旧宿主发回归：锚点写死混淆名 + 「装上即成功」的兜底链
+
+* 触发场景：荣耀那台宿主是 6.6.0，小米是 6.7.1。6.7.1 的离线锚点这轮写成加载
+  `kntr.base.downloader.c`（builder `c$b`），而 6.6.0 上同一个实现类 `KDownloaderImpl` 实现的接口叫
+  `b`、builder 叫 `b$b`——名字加载失败，enqueue 锚点整条落空。
+* 更糟的是兜底链：`installKDownloadServiceUrl()` 的「成功」只代表钩子挂上了，而 `KDownloadService`
+  与 `onStartCommand(Intent,int,int)->int` 在 6.6.0 里形状完全对得上，于是它 `return true` 把后面的
+  `SingleSpec` 挡掉。真机早就证明这条服务路径不带 URL（新下一集零日志），**用「装上」当「走通」，
+  一条已证伪的旁路就能吃掉唯一能用的锚点**。
+* 修法两条：① 接口按角色取——实现类里唯一的 `kntr.base.downloader.*` 接口，方法返回类型是该接口的
+  嵌套接口即 enqueue，两版同一份代码；② 已证伪的旁路只作旁路，不再作为链路终点。
+* 判据：改锚点时把同一条角色谓词在**每个受支持版本的 apk** 上跑一遍（dex 扫描按类描述符 `L...;` 过滤
+  旧宿主），别只在新宿主上验；发版前若第二台设备版本不同，这条就是必做项。
+* 同一形状在 6.7.1 又撞了一次（底栏「我的」）：渲染级隐藏的锚点写死了类名 `bottomtab.g`，
+  而 6.7.1 里容器挪到了 `bottomtab.j`（`g` 退化成一个 Function3 lambda），日志老实打了
+  `not effective ... skip`，用户侧就是「我的 tab 又出来了」。修法同 §54：类名只作候选表
+  （`BOTTOMTAB_CANDIDATES`），认签名 11 参 / p1=List / p9=Composer / p10=int 找函数。
+
+## 55. 「身份取值」是一整片开关：换 `mobi_app` 一个词，国内广告面整片消失
+
+* 起因：IP 属地/稿件可见性把 moss 二进制头里的 `android_i` 报成国内版，服务端按国内版排包，
+  于是「视频提及」游戏推广卡、播放器下挂商品卡这些**国际版原生没有**的槽位全下来了。
+  逐位拦是治标，能不能换个取值让服务端根本不发？
+* 单变量实验（小米测试机，宿主 6.7.1，同账号同一条稿件「热门枕头从夯到拉排行榜…」，
+  2026-10-28 14:14–14:26，只改 `rewriteMobiAppBytes()` 的 `newStr`，REST 侧一行没动）：
+  `android_hd` 两轮（pid 32630 / 29935）简介区 8 屏/4 屏里 `视频提及`=0、`ivGameIcon`=0、`星途天城`=0；
+  换回 `android`（pid 30424 / 25087）同一条稿件前两屏三项 = 1/1/2；再切 `android_hd`（r2）又归零。
+  30 分钟内 hd→android→hd 三次往返、同一判据 ⇒ 不是广告轮换漂移。
+* 未回掉的半边：`android_hd` 下评论区属地 6/6 与 `android` 档同值（`中国香港`/`湖南`），
+  「换 hd 就拿不到 IP 属地」这个担心当场排除。
+* 补上的一格（同机同账号，锁区正样本 aid=117512234668259「中国建造了大量的数据中心…」幽默老日，
+  路径固定为冷启动→我的→历史记录→**按标题**点开（设备驱动脚本按这条路径逐格跑）；此前搜索页
+  `input tap` 不落地，改走历史页就绕开了）：ip OFF 档这一条在历史页标成「已失效/稿件失效」、
+  点进去「加载失败/页面加载失败，请重试」且重试仍失败；`android` 档与 `android_hd` 档都渲染出
+  真实标题、详情页读数一致（评论 568 / 播放 6.3万 / UP 幽默老日）、连拍三帧互不相同=在播。
+  ⇒ hd 不牺牲锁区解锁，hd 档三项（属地、锁区解锁、广告面）全过，**moss 头已正式取 `android_hd`**。
+* 仍留的口子：① §5 那条 REST 主页/空间页取 `android` 的旧结论没回头补验（用户指示跑掉），
+  两条链各自独立取值，所以现在 moss=hd / REST=android 是**故意不对称**，别顺手统一；
+  ② 只验了 UGC 一条稿件，番剧/影视类锁区、以及播放音质/解码档位会不会因端不同，都没测。
+* 判据：这类「取值」实验必须同一台机、同一账号、同一条稿件、同一取帧步长（400px×8 屏），
+  且每轮都拉一遍 `ip[probe]: grpc 改写生效` 与 `fired scope=` 证明钩子在这条进程里真跑过——
+  否则「界面干净」和「根本没进页面」分不清。
+* 出货包复验（1.9.7/35，小米测试机，出厂默认 conf、`confSrc=defaults`）：反汇编出货 dex 直读
+  出货 dex，`rewriteMobiAppBytes` 里成对常量是 `android_i` → `android_hd`；运行时日志
+  `ip[probe]: grpc 改写生效 x1 x-bili-device-bin / x2 x-bili-metadata-bin` 与
+  `ip: space rest params rewritten mobi_app android_i -> android` 两条链各自生效（不对称如设计）；
+  锁区正样本同路径照开（`UnitedBizDetailsActivity`、评论 580、连拍三帧不同）；评论区属地 7/7
+  （`19小时前 四川`/`20小时前 广东`，见 §56）；枕头那条 8/8 屏四个标记全 0
+  （同一套设备驱动脚本跑广告扫描格，同一条稿件在广告拦截关掉时的正样本 dump = 1/1/2）。
+
+## 56. 按可见文案数「有没有」之前，要先枚举这个字段的全部渲染格式
+
+* 复验属地时评论区扫描脚本报「评论日期行=0 带属地=0」，看着像换 hd 把属地打掉了。打开当屏
+  dump 一看：面板是开着的、评论也在，只是这条较新的稿件把时间渲染成「19小时前 四川」，而正则只认
+  绝对日期「9月22日 中国香港」⇒ 一条都匹配不上。**判据本身错，不是被测对象错。**
+* 修的地方两处：① 时间分支补全（分钟前/小时前/天前/昨(天|日) HH:MM/今天 HH:MM）；② 「带属地」
+  的判据从 `split("日")[1]` 改成「这条文案里有没有空格后缀」——只补①不补②，新分支照样数不到。
+* 判据：凡是拿「某段文案出现与否」当功能开关读数的脚本，先在真实 dump 里把这个字段的所有渲染形态
+  列全（绝对/相对时间是同一字段的两种形态），再谈计数；读数为 0 时的第一动作是回去把那屏 dump
+  打开目视找这个字段，而不是先接受「它没了」。
+
+## 57. 「比较新旧」的基准必须在变更动作之前取；解析函数顺手改全局读数＝自己判自己陈旧
+
+* 投递修复①②③ 的第一版 1.9.8（`f4f3310b…`）装机后，设置页手动改一项，宿主侧只留下一条
+  `conf delivery: stale (incoming=1900000000015 current=1900000000015)`，没有 `conf delivered`
+  ——第一次投递把自己判成陈旧件丢掉，改的开关根本进不去。根因是 `BiliConfig.fromConfText()`
+  在解析的同时把全局读数 `sConfSource/sConfGen` 写成了**传入**代次，而 `deliver()` 在它之后才
+  取 `currentGen()` 做比较：基准已经被这次待采纳的配置污染，`incoming <= current` 恒成立。
+  1.9.7 之所以没事，是因为那版 `fromConfText` 不碰 `sConfGen`（这个静态是修复③新加的）。
+* 两处改法：① `fromConfText` 做成纯工厂，不写全局；「生效来源/代次」由调用方在**采纳之后**盖章。
+  ② `deliver()` 里 `currentGen()` 上移到解析之前。顺带补一条：stale 分支也要发回执
+  （`sendConfAck(actObj, nonce, current)`）——文件通道先到位、Intent 只是重复时，宿主确实处在
+  这个代次，界面报「没投递」会逼人反复划掉重开。
+* 判据：凡是「新值 vs 现值」的门（代次、时间戳、hash 比对），先单测一条**只投一次**的路径。
+  两次以上才成立的用例（重复 Intent、A/B 交替）会掩盖基准污染；只看编译通过 + 日志有输出，
+  看不出「输出的是被丢掉那条」。
+* 另一条同期踩到的：`confSrc=defaults` 只说明**宿主没读到任何 conf 文件**，不等于模块 SP 是出厂
+  默认。这台小米的 SP 里留着前几轮实验的 `accel_enabled/feed_only_ugc/hide_*/no_auto_refresh=true`
+  （清理轮只删了 conf 副本没清 SP），任何一次保存都会把整份 SP 灌进宿主。跑 A/B 前要么先在界面上
+  逐项归位，要么把「SP 现值」也拉出来看一眼，别拿 defaults 读数当环境干净的依据。
+
+## 58. 世界可写的 conf 落点要「先验键再降档」；su 多命令脚本不能拿退出码判成败，`cp FILE DIR` 还会套娃假成功
+
+* 起因：root 兜底的落点从宿主 files 搬到 `/data/local/tmp`（小米实测 KSU 域在宿主 files
+  **能删** Hook 建的那份、**建不了**新文件，`cat > …` Permission denied，MLS 类别继承不过去；
+  而 tmp 是 shell 的家，ksu 可写、非 root `adb push` 落出来即 0666、宿主读得到）。换来能用，
+  代价是世界可写——任何 root/shell 都能塞一份高代次 conf 抢配置。
+* 读侧两道锁（`BiliConfig.loadForHook`）：① `conf_key` 防伪键——写侧 `kvConfText` 每次都带
+  `BiliConfig.CONF_KEY`，**只有 tmp 那一档**要求匹配，可信通道（host-conf/模块副本/启动 Intent）
+  不查，免得既有副本因为没这行而集体失效；② 过了键也仍降档，只在没有可信副本压得住它时才采纳，
+  同代次算可信件赢。装机两条正读数：无键 gen=`…060`（高于 host-conf 的 `…030`）冷启动 →
+  `confSrc=host-conf gen=…030`（拒）；带键 gen=`…070` → `confSrc=tmp-conf gen=…070`（采）。
+  强度上限写进常量注释，别自欺：这把键编译在**公开 APK** 里，反解发布件就拿得到，它挡的是
+  「随手写个 tmp 文件抢配置」，不是「专门冲着模块来的人」。
+* 判据（§57 的延续）：「被拒绝」这种什么都不发生的结果，必须换成一条正读数来验。回前台腿拒绝时
+  不打日志，同一手势随后在带键件上打出 `conf reloaded on resume` 只能证明手势有效、证明不了
+  那次真的评估过；改用**冷启动的 `confSrc=` 行**——同一段选源代码，正读数，拒/采都看得见。
+* `su` 脚本的成败不能用退出码：命令是 `A ; B` 形态，`sh` 只把最后一条的码交出来，而宿主 files
+  那条腿建不了新文件属**正常**，会把已经成功的 tmp 报成失败。改成每条腿各自 `echo 标记`、读 stdout。
+* 更阴的一条：落点若已是**同名目录**，`cp 文件 目录` 会把文件塞进那个目录里并返回 0，`chmod` 对
+  目录同样返回 0——兜底报「已写入」而读侧永远找不到（19:52 那次实测正是这个假成功）。每条腿补
+  `test -f` 才算数。
+* 失败分支要找**可控的真实失败**做对照：`mv /data/local/tmp /data/local/tmp.bak` 十几秒再改回来，
+  比去翻用户设备上的 KSU 授权名单干净（那条动的是他机器的安全设置）。这一趟还顺手抓到文案两个缺陷：
+  另一条腿的 `echo` 标记混进失败详情、su 输出带换行会把状态行/logcat 撑成多行——摘标记 + 折平空白。

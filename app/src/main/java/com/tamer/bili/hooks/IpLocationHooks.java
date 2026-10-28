@@ -14,8 +14,10 @@ import io.github.libxposed.api.XposedInterface;
  *
  * 手法：B 站服务端按请求身份(mobi_app/build/channel/appId)决定是否返回 IP 属地字段。
  * 国际版客户端默认以 android_i 身份请求，服务端不返回 location；本模块把请求身份
- * 改写为国内版 android_hd/2001100/master(appId=5, version=2.0.1)，服务端即返回
- * location 字段，而国际版 UI 已内置 IP 属地渲染。
+ * 改写成国内版——moss 二进制头 mobiApp=android_hd，REST 公共参数
+ * mobi_app=android/2001100/master(appId=5, version=2.0.1)——服务端即返回 location
+ * 字段，而国际版 UI 已内置 IP 属地渲染。两个取值不等价：普通 android 档会让服务端
+ * 顺带排下国内详情页广告位，hd 档不会（PITFALLS §55 三格对照）。
  *
  * 6.3.0 落点（真实类名，jadx deobfuscation 会显示为 p488mq0.a / p061ip1.h）：
  *  - KMP moss gRPC（评论 Reply/ DmView 等走 KMossServiceImp -> ip1.h.a）：身份头
@@ -45,8 +47,7 @@ import io.github.libxposed.api.XposedInterface;
  *    现行有效路径只有两条：moss 二进制头 grpc.c.f（主）与 REST addCommonParam（空间页）。
  */
 public final class IpLocationHooks {
-    // 国内版评论客户端身份（与国内版 HD 一致）
-    private static final String MOBI_APP = "android_hd";
+    // 国内版普通端公共参数（mobi_app 的取值见 rewriteMobiAppBytes / installRestParams）
     private static final int BUILD = 2001100;
     private static final String CHANNEL = "master";
     private static final int APP_ID = 5;
@@ -95,10 +96,9 @@ public final class IpLocationHooks {
     private final java.util.concurrent.atomic.AtomicBoolean spaceParamFired =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
-    // 运行时探针：verbose 关闭时，每类改写的第一条必打一行（无 logcat 也能确认活体）
-    private final AtomicBoolean probeCommon = new AtomicBoolean(false);
+    // 运行时探针：verbose 关闭时，rest 每次进程第一条必打一行（无 logcat 也能确认活体）；
+    // moss 那两条（armed / write fired）已改成每 scope 各一条，见 logRewriteOnce 调用点。
     private final AtomicBoolean probeRest = new AtomicBoolean(false);
-    private final AtomicBoolean probeGrpcEntry = new AtomicBoolean(false);
 
     private final AtomicBoolean grpcWriteReady = new AtomicBoolean(false);
     private final AtomicInteger grpcWriteAttempts = new AtomicInteger(0);
@@ -273,10 +273,12 @@ public final class IpLocationHooks {
                     }
                     Object v = chain.getArg(1);
                     if (!(v instanceof byte[])) return chain.proceed();
-                    if (probeGrpcEntry.compareAndSet(false, true)) {
-                        api.info("ip: grpc write fired key=" + key + " bytes=" + ((byte[]) v).length
-                                + " scope=" + sCommonScope.get());
-                    }
+                    // 每个 scope 各留一条：原先 once-per-process，View 先打过之后
+                    // 评论/历史/空间全被吞，排查「评论区没被改写」时日志读不出真相。
+                    String probeScope = String.valueOf(sCommonScope.get());
+                    logRewriteOnce("fired:" + probeScope,
+                            "ip: grpc write fired key=" + key + " bytes=" + ((byte[]) v).length
+                                    + " scope=" + probeScope);
                     byte[] out = rewriteMobiAppBytes((byte[]) v);
                     if (out == null) return chain.proceed();
                     long done = grpcRewriteDone.incrementAndGet();
@@ -358,15 +360,18 @@ public final class IpLocationHooks {
             }
             String pkg = g == null ? null : strField(g, "a");
             rememberService(svc, pkg);
-            // 限定档覆盖面：评论区 + 空间页 + 主页 + 稿件详情/取流
+            // 限定档覆盖面：评论区 + 空间页 + 主页 + 稿件详情/取流 + 历史记录
             // （各按服务名或包名识别，不做全局声明）
             boolean want = ip && (isReplyService(svc) || isSpaceService(svc, pkg)
-                    || isHomeService(svc, pkg) || isViewService(svc, pkg));
+                    || isHomeService(svc, pkg) || isViewService(svc, pkg)
+                    || isHistoryService(svc));
             if (!want) return null;
             if (api.isVerboseLoggingEnabled()) {
                 api.info("ip: scoped rewrite armed svc=" + svc + " method=" + method);
             } else {
-                logRewrite(probeCommon, "限定改写待生效: " + svc + " pkg=" + pkg);
+                // 每个 scope 各一条（原先整进程只一条，View 先打过就把评论那条吞掉了）。
+                logRewriteOnce("armed:" + svc,
+                        "[探针] ip: 限定改写待生效: " + svc + " pkg=" + pkg);
             }
             return svc;
         } catch (Throwable t) {
@@ -465,7 +470,7 @@ public final class IpLocationHooks {
         return null;
     }
 
-    /** 单个二进制身份头的改写（android_i -> android，长度前缀重建）。返回是否改写。 */
+    /** 单个二进制身份头的改写（android_i -> android_hd，长度前缀重建）。返回是否改写。 */
     private boolean rewriteHeaderEntry(java.util.Map map, String key) {
         try {
             Object v = map.get(key);
@@ -538,8 +543,11 @@ public final class IpLocationHooks {
      *  取播放信息发 svc=Player pkg=bilibili.app.playerunite.v1）。
      *  这两族的描述符字段填法与评论区相反——短名在 b、全名在 a（评论区是全名在 b），所以判定必须
      *  同时认 pkg，只比 svc 会恒不命中。app.view.v1 / app.playurl.v1 是非 unite 的老形态，一并认。
-     *  为什么要武装它：国际版服务端按 mobi_app 裁剪稿件可见性，限定档下这类稿件直接「视频不见了哦」，
-     *  而全局档同一 BV 能播——本判定就是把那份收益定域到取稿件这一处。 */
+     *  为什么要武装它（6.7.1 复测订正）：不武装这类稿件在国际版根本取不到（限定档详情页
+     *  「视频不见了哦」、历史条目直接标「稿件失效」）。但别把它读成「全局档就能播」——同一 BV
+     *  在两档下都拿到完整国内 DASH 档位，也都只给境外镜像，播放侧 0KB/s 表现一模一样：
+     *  改写决定的是稿件在不在，流能不能跑通是另一件事：两档下都只给境外镜像，0KB/s 与改写无关，
+     *  换境内镜像在本模块做不到（取流地址在 native 侧选，Java 层没有可改的接缝）。 */
     private static boolean isViewService(String svc, String pkg) {
         String p = pkg == null ? null : pkg.toLowerCase();
         if (p != null && (p.startsWith("bilibili.app.view") || p.startsWith("bilibili.app.playurl")
@@ -549,6 +557,15 @@ public final class IpLocationHooks {
         String s = svc == null ? null : svc.toLowerCase();
         return s != null && (s.startsWith("bilibili.app.view") || s.startsWith("bilibili.app.playurl")
                 || s.startsWith("bilibili.app.playerunite"));
+    }
+
+    /** 历史记录服务判定（6.7.1 实机：历史页发 svc=History pkg=bilibili.app.interface.v1，
+     *  改写没武装它 → 服务端按 android_i 裁剪 → 条目直接标「稿件失效」）。
+     *  **只按服务名认，不认包名**：那个包是界面聚合包，同族还挂着 Teenagers 等服务，
+     *  按包整族武装会把不该改写的调用一起改了。 */
+    private static boolean isHistoryService(String svc) {
+        String s = svc == null ? null : svc.toLowerCase();
+        return s != null && (s.equals("history") || s.endsWith(".history"));
     }
 
     private void retry(Runnable r) {
@@ -568,7 +585,10 @@ public final class IpLocationHooks {
     /** 6.4.0 空间页 REST 参数改写：空间身份走 URL 参数（mobi_app=android_i），
      *  不走 moss/proto 头。挂空间页专属拦截器 e.addCommonParam（天然定域：只有空间请求经过它）。 */
     private void installSpaceRestParams() {
-        String[] cand = {"com.bilibili.app.comm.list.common.api.e"};
+        // 这个拦截器的类字母序随构建漂移：6.4.0=…common.api.e，6.7.1=…common.api.f
+        // （e 在 6.7.1 仍存在但已没有 addCommonParam(Map)——旧名被复用，认方法不认名）。
+        String[] cand = {"com.bilibili.app.comm.list.common.api.f",
+                "com.bilibili.app.comm.list.common.api.e"};
         for (final String cn : cand) {
             try {
                 Class<?> c = api.load(cl, cn);
@@ -825,7 +845,7 @@ public final class IpLocationHooks {
      *  addCommonParamToUrl(t, z.a) 接收 URL 并在内部调用 addCommonParam(Map)（同线程）。
      *  hook addCommonParamToUrl 记录 URL（ThreadLocal），
      *  hook addCommonParam 按 URL 判定主页/评论并改写 map。
-     *  主页 -> android（国内版普通），评论 -> android_hd。 */
+     *  主页与评论都 -> android（国内版普通）。 */
     private void installRestParams() {
         if (restParamsAttempts.incrementAndGet() > MAX_RETRY) {
             // 6.4.0 okretro 参数基类移除；REST 公共参数路径已由 Cq0.a 拦截器覆盖
@@ -946,7 +966,9 @@ public final class IpLocationHooks {
     private static byte[] rewriteMobiAppBytes(byte[] src) {
         if (src == null) return null;
         byte[] oldStr = "android_i".getBytes();
-        byte[] newStr = "android".getBytes(); // 统一普通版身份（评论区/主页均生效）
+        // HD 端身份：与 android 档同为国内版（IP 属地、锁区稿件解锁两项实测等价），
+        // 但服务端不再按普通手机端排国内广告位（详情页「视频提及」游戏卡 8/8 屏归零）。
+        byte[] newStr = "android_hd".getBytes();
         int foundIdx = -1;
         for (int i = 0; i <= src.length - oldStr.length; i++) {
             boolean match = true;
