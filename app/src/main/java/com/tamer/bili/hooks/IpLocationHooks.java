@@ -107,6 +107,9 @@ public final class IpLocationHooks {
     /** 评论区限定模式：moss-common-headers 拦截器在 proceed 前设置的本次 RPC 服务名。
      *  up1.a.a() 在该拦截器内部被同步调用（同线程），凭此标记精确改写。 */
     private static final ThreadLocal<String> sCommonScope = new ThreadLocal<String>();
+    /** 参数注入时刻的本请求 URL。基类 addCommonParamToUrl/…ToBodyResult 同步调用
+     *  addCommonParam(Map)，同线程，故子类的改写钩子读得到。 */
+    private static final ThreadLocal<String> sRestUrl = new ThreadLocal<String>();
 
     /** 空间页 UI 定域：页面打开后的时间窗（毫秒时间戳），窗口内 kr1.a.a 全部改写。
      *  6.4.0 空间 REST 走 kntr 直连 provider，不经过 header.b，svc 无法定位，只能按 UI 定位。 */
@@ -265,14 +268,14 @@ public final class IpLocationHooks {
                     if (!"x-bili-metadata-bin".equals(key)
                             && !"x-bili-device-bin".equals(key)) return chain.proceed();
                     if (!api.isIpLocationEnabled()) return chain.proceed();
-                    if (api.getIpScopeMode() == BiliConfig.IP_SCOPE_COMMENT) {
-                        // 评论区限定：仅头 scope 标记在身的请求；空间页 moss 通道走 UI 时间窗
-                        if (sCommonScope.get() == null) {
-                            if (System.currentTimeMillis() >= sUiSpaceUntil) return chain.proceed();
-                        }
-                    }
                     Object v = chain.getArg(1);
                     if (!(v instanceof byte[])) return chain.proceed();
+                    if (api.getIpScopeMode() == BiliConfig.IP_SCOPE_COMMENT) {
+                        // 评论区限定：仅头 scope 标记在身的请求；空间页 moss 通道走 UI 时间窗
+                        if (sCommonScope.get() == null && System.currentTimeMillis() >= sUiSpaceUntil) {
+                            return chain.proceed();
+                        }
+                    }
                     // 每个 scope 各留一条：原先 once-per-process，View 先打过之后
                     // 评论/历史/空间全被吞，排查「评论区没被改写」时日志读不出真相。
                     String probeScope = String.valueOf(sCommonScope.get());
@@ -323,49 +326,21 @@ public final class IpLocationHooks {
                 logRewriteOnce("ctx", "ip: common headers ctx not found (chain=" + chainObj.getClass().getName() + ")");
                 return null;
             }
-            // 方法描述符随构建整族换包：6.3.0=jp1.g / 6.4.0=Zq1.g / 6.5.0=kr1.g
-            // / 6.6.0=xr1.g（dex 实证：kr1.a..n 与 xr1.a..n 一一对应、字段同形，
-            // grpc.c 构造器参数同步从 kr1.* 变 xr1.*）。字段语义不变
-            // （a=packageName, b=serviceName, c=methodName，kr1.g 经 KMethodDescriptor
-            // toString 实证）。名字提示之外再加「形状兜底」：字段 b 上只要是个声明了
-            // a/b/c 三个 String 字段的对象就当描述符用——下次换包不用再改代码。
-            Object g = fieldTypedAnyHint(ctx, "b",
-                    new String[]{"xr1.g", "kr1.g", "Zq1.g", "jp1.g"});
-            if (g == null) {
-                g = methodDescriptorByShape(fieldInHierarchy(ctx, "b"));
-            }
-            // 6.3.0 jp1.g：service 在字段 a；6.4.0/6.5.0：a=packageName, b=serviceName，
-            // c=methodName —— 语义移位过，两个都试，取像服务名的那个
-            String svc = g == null ? null : strField(g, "b");
-            String method = g == null ? null : strField(g, "c");
-            if (!isReplyService(svc)) {
-                String alt = strField(g, "a");
-                if (isReplyService(alt)) svc = alt;
-            }
-            if (svc == null) {
-                // 兜底：k 也有服务名字段（6.3.0=jp1.k / 6.4.0=Zq1.k / 6.5.0=kr1.k
-                // / 6.6.0=xr1.k）
-                Object k = fieldTypedAnyHint(ctx, "a",
-                        new String[]{"xr1.k", "kr1.k", "Zq1.k", "jp1.k"});
-                svc = k == null ? null : strField(k, "a");
-            }
-            if (svc == null) {
-                // 末路兜底：描述符对象里任何 String 字段像服务名就算它
-                // （服务名恒为 "bilibili.xxx.vN" 形态，方法名/URL 路径不会误命中）
-                svc = serviceLikeString(g);
-            }
-            if (svc == null && g != null) {
+            String[] sp = resolveServiceAndPkg(ctx);
+            String svc = sp == null ? null : sp[0];
+            String pkg = sp == null ? null : sp[1];
+            String method = sp == null ? null : sp[2];
+            if (svc == null && sp != null) {
                 logRewriteOnce("svc", "ip: method descriptor resolved but no service string (cls="
-                        + g.getClass().getName() + ")");
+                        + ctx.getClass().getName() + ")");
             }
-            String pkg = g == null ? null : strField(g, "a");
             rememberService(svc, pkg);
-            // 限定档覆盖面：评论区 + 空间页 + 主页 + 稿件详情/取流 + 历史记录
-            // （各按服务名或包名识别，不做全局声明）
-            boolean want = ip && (isReplyService(svc) || isSpaceService(svc, pkg)
-                    || isHomeService(svc, pkg) || isViewService(svc, pkg)
-                    || isHistoryService(svc));
-            if (!want) return null;
+            if (!isArmedFamily(svc, pkg)) return null;
+            // viewunite 这一族只武装 View 一个方法。整族武装时视频弹幕直接为零——
+            // AIRelateAsync / ViewProgress 里有一个会按国内端把弹幕池裁掉，只放 View 就回来，
+            // 而详情页的解锁不受影响（同一条锁区稿件两格都能开）。
+            // 取流那族必须照常全武装：漏掉 Player 时锁区稿件详情页能开、播放器却「加载失败」。
+            if (isViewService(svc, pkg) && !isPlayerService(svc, pkg) && !"View".equals(method)) return null;
             if (api.isVerboseLoggingEnabled()) {
                 api.info("ip: scoped rewrite armed svc=" + svc + " method=" + method);
             } else {
@@ -378,6 +353,53 @@ public final class IpLocationHooks {
             api.warn("ip: computeWantedService failed: " + t);
             return null;
         }
+    }
+
+    /** 限定档覆盖面：评论区 + 空间页 + 主页 + 稿件详情/取流 + 历史记录
+     *  （各按服务名或包名识别，不做全局声明）。 */
+    private boolean isArmedFamily(String svc, String pkg) {
+        return isReplyService(svc) || isSpaceService(svc, pkg)
+                || isHomeService(svc, pkg) || isViewService(svc, pkg)
+                || isHistoryService(svc);
+    }
+
+    /** 从 grpc.c 上下文里解析「这一次调用自己的」服务名/包名/方法名，返回 {svc, pkg, method}；
+     *  描述符认不出来返回 null。 */
+    private String[] resolveServiceAndPkg(Object ctx) {
+        // 方法描述符随构建整族换包：6.3.0=jp1.g / 6.4.0=Zq1.g / 6.5.0=kr1.g
+        // / 6.6.0=xr1.g（dex 实证：kr1.a..n 与 xr1.a..n 一一对应、字段同形，
+        // grpc.c 构造器参数同步从 kr1.* 变 xr1.*）。字段语义不变
+        // （a=packageName, b=serviceName, c=methodName，kr1.g 经 KMethodDescriptor
+        // toString 实证）。名字提示之外再加「形状兜底」：字段 b 上只要是个声明了
+        // a/b/c 三个 String 字段的对象就当描述符用——下次换包不用再改代码。
+        Object g = fieldTypedAnyHint(ctx, "b",
+                new String[]{"xr1.g", "kr1.g", "Zq1.g", "jp1.g"});
+        if (g == null) {
+            g = methodDescriptorByShape(fieldInHierarchy(ctx, "b"));
+        }
+        if (g == null) return null;
+        // 6.3.0 jp1.g：service 在字段 a；6.4.0/6.5.0：a=packageName, b=serviceName，
+        // c=methodName —— 语义移位过，两个都试，取像服务名的那个
+        String svc = strField(g, "b");
+        String method = strField(g, "c");
+        if (!isReplyService(svc)) {
+            String alt = strField(g, "a");
+            if (isReplyService(alt)) svc = alt;
+        }
+        String pkg = strField(g, "a");
+        if (svc == null) {
+            // 兜底：k 也有服务名字段（6.3.0=jp1.k / 6.4.0=Zq1.k / 6.5.0=kr1.k
+            // / 6.6.0=xr1.k）
+            Object k = fieldTypedAnyHint(ctx, "a",
+                    new String[]{"xr1.k", "kr1.k", "Zq1.k", "jp1.k"});
+            svc = k == null ? null : strField(k, "a");
+        }
+        if (svc == null) {
+            // 末路兜底：描述符对象里任何 String 字段像服务名就算它
+            // （服务名恒为 "bilibili.xxx.vN" 形态，方法名/URL 路径不会误命中）
+            svc = serviceLikeString(g);
+        }
+        return new String[]{svc, pkg, method};
     }
 
     /** 形状兜底：认出「KMP 方法描述符」对象——自带 a/b/c 三个 String 字段
@@ -559,6 +581,16 @@ public final class IpLocationHooks {
                 || s.startsWith("bilibili.app.playerunite"));
     }
 
+    /** 取流那族（不含 viewunite）：锁区稿件的播放器只认这个方法，见 isViewService 的注释。 */
+    private static boolean isPlayerService(String svc, String pkg) {
+        String p = pkg == null ? null : pkg.toLowerCase();
+        if (p != null && (p.startsWith("bilibili.app.playurl") || p.startsWith("bilibili.app.playerunite"))) {
+            return true;
+        }
+        String s = svc == null ? null : svc.toLowerCase();
+        return s != null && (s.startsWith("bilibili.app.playurl") || s.startsWith("bilibili.app.playerunite"));
+    }
+
     /** 历史记录服务判定（6.7.1 实机：历史页发 svc=History pkg=bilibili.app.interface.v1，
      *  改写没武装它 → 服务端按 android_i 裁剪 → 条目直接标「稿件失效」）。
      *  **只按服务名认，不认包名**：那个包是界面聚合包，同族还挂着 Teenagers 等服务，
@@ -582,8 +614,10 @@ public final class IpLocationHooks {
         api.info("[探针] ip: " + msg);
     }
 
-    /** 6.4.0 空间页 REST 参数改写：空间身份走 URL 参数（mobi_app=android_i），
-     *  不走 moss/proto 头。挂空间页专属拦截器 e.addCommonParam（天然定域：只有空间请求经过它）。 */
+    /** 空间页 REST 参数改写：空间身份走 URL 参数（mobi_app=android_i），不走 moss/proto 头。
+     *  6.7.1 实机 dex：@RequestInterceptor 是逐方法注解，BiliSpaceApiService 与
+     *  pegasus.channelv2.api.ChannelV2ApiService 共用同一个 f，所以「认类名」必然越界——
+     *  首页/详情页请求一起被改成 android，弹幕接口跟着被服务端裁空。改按 URL 定域。 */
     private void installSpaceRestParams() {
         // 这个拦截器的类字母序随构建漂移：6.4.0=…common.api.e，6.7.1=…common.api.f
         // （e 在 6.7.1 仍存在但已没有 addCommonParam(Map)——旧名被复用，认方法不认名）。
@@ -602,11 +636,13 @@ public final class IpLocationHooks {
                     api.debug("ip: space rest params " + cn + ".addCommonParam not found");
                     continue;
                 }
+                installRestUrlScope(c);
                 api.deoptimize(m);
                 api.addHook("ip: space rest params", m, new XposedInterface.Hooker() {
                     @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                         Object result = chain.proceed();
                         if (!api.isIpLocationEnabled()) return result;
+                        if (classifyRest(sRestUrl.get()) == null) return result;
                         try {
                             Object mapObj = chain.getArg(0);
                             if (mapObj instanceof java.util.Map) {
@@ -630,6 +666,46 @@ public final class IpLocationHooks {
                 api.info("ip: space rest params hook ok -> " + cn + ".addCommonParam");
             } catch (Throwable t) {
                 api.debug("ip: space rest params " + cn + " unavailable: " + t);
+            }
+        }
+    }
+
+    /** URL 定域源头：在参数注入器基类的两个入口记下本请求 URL。
+     *  6.7.1 dex（aC0.a）里 addCommonParam(Map) 只被 addCommonParamToUrl 与
+     *  addCommonParamToBodyResult 同步调用，且 signQuery 排在 addCommonParam 之后——
+     *  所以改写只能留在这条腿上（签名前），URL 也只能从这两个入口取。 */
+    private void installRestUrlScope(Class<?> sub) {
+        for (Class<?> k = sub; k != null && k != Object.class; k = k.getSuperclass()) {
+            Method[] ms;
+            try {
+                ms = k.getDeclaredMethods();
+            } catch (Throwable t) {
+                continue;
+            }
+            for (Method mm : ms) {
+                String n = mm.getName();
+                if (!n.equals("addCommonParamToUrl") && !n.equals("addCommonParamToBodyResult")) continue;
+                Class<?>[] ps = mm.getParameterTypes();
+                if (ps.length == 0 || !ps[0].getName().startsWith("okhttp3")) continue;
+                api.deoptimize(mm);
+                api.addHook("ip: param url scope", mm, new XposedInterface.Hooker() {
+                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                        if (!api.isIpLocationEnabled()) return chain.proceed();
+                        String url = null;
+                        try {
+                            Object u = chain.getArg(0);
+                            url = u == null ? null : u.toString();
+                        } catch (Throwable ignore) { }
+                        String old = sRestUrl.get();
+                        sRestUrl.set(url);
+                        try {
+                            return chain.proceed();
+                        } finally {
+                            if (old == null) sRestUrl.remove(); else sRestUrl.set(old);
+                        }
+                    }
+                });
+                api.info("ip: rest url scope hook ok -> " + k.getName() + "." + n);
             }
         }
     }

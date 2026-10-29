@@ -1,5 +1,10 @@
 # BiliTamer Release notes
 
+## v1.9.9
+
+* **视频弹幕回来了 / In-video danmaku is back**: 详情页那一族只武装 `View` 一个方法（`AIRelateAsync`
+  与 `ViewProgress` 里有一个会按国内端把弹幕池裁掉），取流族照常全武装，IP 属地与锁区解锁两件事都不掉。
+
 ## v1.9.8
 
 * **这一页同时覆盖 1.9.4–1.9.7 / This page also covers 1.9.4–1.9.7**: 那四版只在测试机上滚过、没有单独发布，
