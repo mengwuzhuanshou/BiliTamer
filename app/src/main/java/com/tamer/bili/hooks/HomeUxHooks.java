@@ -554,11 +554,12 @@ public final class HomeUxHooks {
     /**
      * 解析「路由动作」这一发：{总线方法, (String,int,int) 构造器, 动作类}，解析一次缓存复用。
      * 候选表按版本 dex 里 {@code PageRouteComponent} 那个 Intent 处理口的 new-instance 逐版取来
-     * （6.7.1=xF1.g→C0、6.6.0=bE1.g→v0、6.5.0=jD1.g→w0、6.4.0=FC1.g→w0、6.3.0=FA1.g→x0，
-     * 五处函数体逐条对读，三步形状「读 vm 字段 → new <包>.g(url,0,2) → vm.<总线>(g)」各版一致；
-     * 6.7.1 取证：{@code PageRouteComponent#b4(Intent)}、
-     * {@code TopLeftComponent$initActionHandler$1$1}（头像那一发）都是
-     * new xF1/g(String,I,I) + HomeFrameViewModel#C0(LxF1/b;)V）。
+     * （6.8.0=KK1.g→C0、6.7.1=xF1.g→C0、6.6.0=bE1.g→v0、6.5.0=jD1.g→w0、6.4.0=FC1.g→w0、
+     * 6.3.0=FA1.g→x0，六处函数体逐条对读，三步形状「读 vm 字段 → new <包>.g(url,0,2) →
+     * vm.<总线>(g)」各版一致；6.8.0 取证：{@code PageRouteComponent#h4(Intent)}（旧 b4 漂移）、
+     * {@code TopLeftComponent$initActionHandler$1$1#invokeSuspend}（头像那一发，
+     * 'bilibili://user_center/mine?bottom_tab_id=我的Bottom' 字串仍在）都是
+     * new KK1/g(String,I,I) + HomeFrameViewModel#C0(LKK1/b;)V）。
      * 判定不靠包名猜：动作类必须有 (String,int,int) 构造器，且当前 VM 类上存在
      * 「单参 void、参数是接口、且该接口正好能接住这个动作类」的方法——两条同时成立才算认出总线。
      */
@@ -568,7 +569,7 @@ public final class HomeUxHooks {
             return cached;
         }
         ClassLoader loader = vmCls.getClassLoader();
-        String[] candidates = {"xF1.g", "bE1.g", "jD1.g", "FC1.g", "FA1.g"};
+        String[] candidates = {"KK1.g", "xF1.g", "bE1.g", "jD1.g", "FC1.g", "FA1.g"};
         for (int ci = 0; ci < candidates.length; ci++) {
             Class<?> actionCls;
             try {
@@ -680,6 +681,8 @@ public final class HomeUxHooks {
      * xF1/c 全 dex 只有这一处 new，角色就是「选中第 i 个底栏 tab」；
      * 同族的 xF1/v(I,TabSelectFromType) 才是别的语义（PageBuildComponent#onPageSelected
      * 与屏幕适配控件 new 的「滑动切页回执」），别混。
+     * 6.8.0 同形状整族换包到 KK1：new KK1/c(I) 全 dex 仍只有
+     * {@code home/components/bottomtab/c#invoke(Object)} 一处（dexsite 实证），总线仍 C0。
      */
     private boolean dispatchMineTabSelect() {
         try {
@@ -714,8 +717,8 @@ public final class HomeUxHooks {
                         }
                     }
                 }
-                api.warn("khome: tab select action class drift, tried xF1.c/jD1.c/FC1.c"
-                        + " (6.6.0 底栏点击不走总线；6.7.1 又走 xF1.c→C0，见 findTabDispatch 注释)");
+                api.warn("khome: tab select action class drift, tried KK1.c/xF1.c/jD1.c/FC1.c"
+                        + " (6.6.0 底栏点击不走总线；6.7.1 走 xF1.c→C0、6.8.0 走 KK1.c→C0，见 findTabDispatch 注释)");
             }
             return false;
         } catch (Throwable t) {
@@ -732,7 +735,7 @@ public final class HomeUxHooks {
      */
     private Object[] findTabDispatch(Class<?> vmCls) {
         ClassLoader vmCl = vmCls.getClassLoader();
-        String[] candidates = {"xF1.c", "jD1.c", "FC1.c"};
+        String[] candidates = {"KK1.c", "xF1.c", "jD1.c", "FC1.c"};
         for (int ci = 0; ci < candidates.length; ci++) {
             Class<?> actionCls;
             try {

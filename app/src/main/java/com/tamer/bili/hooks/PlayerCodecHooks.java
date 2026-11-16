@@ -156,8 +156,8 @@ public final class PlayerCodecHooks {
     }
 
     /** hook 返回 fnval 的类方法（int c() 与 long d()）。6.3.0: FG1.b；6.4.0: GI1.e；
-     *  6.5.0: kJ1.a；6.6.0: aK1.a；6.7.1: wL1.a（a/b/c/d 四方法这版编成了 static，
-     *  形状校验只看方法名+返回类型+三个 static 字段，不区分静不静态，照样命中）。
+     *  6.5.0: kJ1.a；6.6.0: aK1.a；6.7.1: wL1.a；6.8.0: JQ1.a（a/b/c/d 四方法这版编成了
+     *  static，形状校验只看方法名+返回类型+三个 static 字段，不区分静不静态，照样命中）。
      *  四类同构：单例 a、I 缓存 c、J 缓存 d、a()Z/b()Z 懒加载能力位、c()I/d()J。
      *  （6.5.0 jadx 实证 c() 仍含 512/2048/65536 fnval 位运算。）
      *  6.6.0 定位置证（按形状全 dex 反查，两版都唯一命中）：
@@ -168,12 +168,14 @@ public final class PlayerCodecHooks {
      *  c() 里调 IjkCpuInfo.getCpuName，与 soft_fnval/fnval 职责一致。
      *  6.7.1 同一形状全 dex 反查仍唯一命中（wL1.a），且方法体自证：c() 里
      *  IjkCpuInfo.getCpuName + IjkCodecHelper.isHDRSupport/isH266SupportHard，
-     *  d() 里 IjkCodecHelper.isH266SupportSoft，日志 tag 就是真名 "IjkFnHelper"。 */
+     *  d() 里 IjkCodecHelper.isH266SupportSoft，日志 tag 就是真名 "IjkFnHelper"。
+     *  6.8.0 同一形状全 dex 反查仍唯一命中（JQ1.a，classes27），c() 里同样
+     *  IjkCpuInfo.getCpuName + 8k 白名单/机型判断，职责未变。 */
     private void installFnval() throws Throwable {
         Class<?> fg1b = null;
         String fnvalClsUsed = null;
         StringBuilder why = new StringBuilder();
-        for (String cn : new String[]{"wL1.a", "aK1.a", "kJ1.a", "GI1.e", "FG1.b"}) {
+        for (String cn : new String[]{"JQ1.a", "wL1.a", "aK1.a", "kJ1.a", "GI1.e", "FG1.b"}) {
             try {
                 Class<?> c = api.load(cl, cn);
                 if (isFnvalHolder(c)) { fg1b = c; fnvalClsUsed = cn; break; }
@@ -185,7 +187,7 @@ public final class PlayerCodecHooks {
             }
         }
         if (fg1b == null) {
-            api.warn("codec: fnval class not found (wL1.a / aK1.a / kJ1.a / GI1.e / FG1.b)"
+            api.warn("codec: fnval class not found (JQ1.a / wL1.a / aK1.a / kJ1.a / GI1.e / FG1.b)"
                     + " loader=" + cl + " why: " + why);
             return;
         }
@@ -429,10 +431,37 @@ public final class PlayerCodecHooks {
         }
     }
 
-    /** hook MediaResource.I(int,int)：默认音轨顺位 杜比 > Hi-Res > AAC。 */
+    /** hook MediaResource 的「(int,int)→IjkMediaAsset」构建方法：默认音轨顺位 杜比 > Hi-Res > AAC。
+     *  方法名随构建漂移（6.7.1=I、6.8.0=G），按签名认不认名。
+     *  杜比/无损字段也漂移（6.7.1=l/m、6.8.0=m/n，l 在 6.8.0 被复用成 boolean）：
+     *  按「AudioEnhancementResource 类型字段的声明序」认——两版都是第一个=杜比、
+     *  第二个=无损（JSON 解析里 'dolby'/'hires' 的写位顺序实证），不按字母名猜，
+     *  免得候选顺序在旧版把 hires 当 dolby 用。
+     *  增强资源里的列表字段 b→c、流 id 字段 a→b（DashMediaIndex.b 即 defaultAudioId）。 */
     private void installAudioDefault() throws Throwable {
         final Class<?> mr = api.load(cl, "com.bilibili.lib.media.resource.MediaResource");
-        final Method m = api.declaredMethod(mr, "I", int.class, int.class);
+        Method m = null;
+        for (Method mm : mr.getDeclaredMethods()) {
+            Class<?>[] ps = mm.getParameterTypes();
+            if (ps.length == 2 && ps[0] == int.class && ps[1] == int.class
+                    && mm.getReturnType().getName().endsWith("IjkMediaAsset")) {
+                m = mm;
+                break;
+            }
+        }
+        if (m == null) {
+            throw new NoSuchMethodException("MediaResource (int,int)->IjkMediaAsset not found");
+        }
+        final Class<?> aer = api.load(cl, "com.bilibili.lib.media.resource.AudioEnhancementResource");
+        java.util.List<Field> aerFields = new java.util.ArrayList<>();
+        for (Field f : mr.getDeclaredFields()) {
+            if (!java.lang.reflect.Modifier.isStatic(f.getModifiers()) && f.getType() == aer) {
+                f.setAccessible(true);
+                aerFields.add(f);
+            }
+        }
+        final Field dolbyF = aerFields.size() > 0 ? aerFields.get(0) : null;
+        final Field hiresF = aerFields.size() > 1 ? aerFields.get(1) : null;
         api.deoptimize(m);
         api.addHook("codec: audio default", m, new XposedInterface.Hooker() {
             @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
@@ -442,13 +471,13 @@ public final class PlayerCodecHooks {
                 if (thiz == null) return chain.proceed();
                 Object arg0 = chain.getArg(0);
                 if (audio == 2) { // 锁定杜比
-                    Integer id = firstAudioIdOf(thiz, "l"); // l = Dolby
+                    Integer id = firstAudioIdOf(thiz, dolbyF);
                     if (id != null) {
                         return chain.proceed(new Object[]{arg0, id});
                     }
                 } else if (audio == 3) { // 锁定 Hi-Res 无损
-                    Integer id = firstAudioIdOf(thiz, "m"); // m = Hi-Res
-                    if (id == null) id = firstAudioIdOf(thiz, "l"); // 降级杜比
+                    Integer id = firstAudioIdOf(thiz, hiresF);
+                    if (id == null) id = firstAudioIdOf(thiz, dolbyF); // 降级杜比
                     if (id != null) {
                         return chain.proceed(new Object[]{arg0, id});
                     }
@@ -458,21 +487,27 @@ public final class PlayerCodecHooks {
                 return chain.proceed();
             }
         });
-        api.info("codec: audio default hook ok -> MediaResource.I(int,int)");
+        api.info("codec: audio default hook ok -> MediaResource." + m.getName()
+                + "(int,int) dolby=" + (dolbyF == null ? "?" : dolbyF.getName())
+                + " hires=" + (hiresF == null ? "?" : hiresF.getName()));
     }
 
-    /** 从 MediaResource 的 AudioEnhancementResource 字段取第一个音频流 id。 */
-    private Integer firstAudioIdOf(Object mediaResource, String field) {
+    /** 从 MediaResource 的 AudioEnhancementResource 字段取第一个音频流 id。
+     *  列表字段 6.8.0=c/旧=b；流 id 6.8.0=b/旧=a，依次试。 */
+    private Integer firstAudioIdOf(Object mediaResource, Field enhField) {
+        if (enhField == null) return null;
         try {
-            Object enh = getFieldValue(mediaResource, field);
+            Object enh = enhField.get(mediaResource);
             if (enh == null) return null;
-            Object list = getFieldValue(enh, "b");
+            Object list = getFieldValue(enh, "c");
+            if (!(list instanceof List)) list = getFieldValue(enh, "b");
             if (!(list instanceof List)) return null;
             List<?> items = (List<?>) list;
             if (items.isEmpty()) return null;
             Object first = items.get(0);
             if (first == null) return null;
-            Object id = getFieldValue(first, "a");
+            Object id = getFieldValue(first, "b");
+            if (!(id instanceof Number)) id = getFieldValue(first, "a");
             return id instanceof Number ? Integer.valueOf(((Number) id).intValue()) : null;
         } catch (Throwable t) {
             return null;

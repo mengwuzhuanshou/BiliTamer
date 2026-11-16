@@ -1,5 +1,11 @@
 # BiliTamer Release notes
 
+## v1.9.10
+
+* **6.8.0 全量重挂锚 / Re-anchored across 6.8.0**: 宿主 6.8.0 上五处漂移锚点重新定位——头像进「我的」的路由/选中动作（`KK1.g`/`KK1.c`）、fnval 位（`JQ1.a`）、默认音轨构建（`MediaResource.G(int,int)`，杜比/无损字段改按类型声明序认）、听完守卫（`UQ1.m`）、直播后台播放门（`XX.e$b/$c.o1`）。
+* **头像入口与历史记录修复 / Avatar entry & history fixed**: 隐藏「我的」后点头像不再落深链独立壳（壳内路由未激活导致按钮全失效、历史页空白原地跳转），改走真实 tab 选中总线，真机验证我的页按钮与历史条目起播均正常。
+* **同时包含未单独发布的 v1.9.9 / Also covers the unreleased v1.9.9**: 视频内弹幕恢复——详情页 viewunite 族只武装 `View` 一个方法，取流族照常全武装，锁区视频能开能播且弹幕不被服务端裁掉。
+
 ## v1.9.9
 
 * **视频弹幕回来了 / In-video danmaku is back**: 详情页那一族只武装 `View` 一个方法（`AIRelateAsync`
