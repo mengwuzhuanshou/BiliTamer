@@ -569,7 +569,7 @@ public final class HomeUxHooks {
             return cached;
         }
         ClassLoader loader = vmCls.getClassLoader();
-        String[] candidates = {"KK1.g", "xF1.g", "bE1.g", "jD1.g", "FC1.g", "FA1.g"};
+        String[] candidates = {"z451", "KK1.g", "xF1.g", "bE1.g", "jD1.g", "FC1.g", "FA1.g"};
         for (int ci = 0; ci < candidates.length; ci++) {
             Class<?> actionCls;
             try {
@@ -683,6 +683,12 @@ public final class HomeUxHooks {
      * 与屏幕适配控件 new 的「滑动切页回执」），别混。
      * 6.8.0 同形状整族换包到 KK1：new KK1/c(I) 全 dex 仍只有
      * {@code home/components/bottomtab/c#invoke(Object)} 一处（dexsite 实证），总线仍 C0。
+     * 6.9.0 混淆改扁平名：动作类 frj（实现 smb 接口），new frj(I) 全 dex 仅
+     * {@code grj#invoke(Object)} 一处，该 lambda 0091 读 {@code k1c.c : HomeFrameViewModel}
+     * → 0097 new frj(I) → 009a 调 {@code HomeFrameViewModel#H0(Lsmb;)V}（总线 C0→H0）；
+     * 路由动作同族换到 z451(String,I,I)（TopLeftComponent$initActionHandler$1$1#invokeSuspend
+     * 0x14e 构造，仍含 'bilibili://user_center/mine?bottom_tab_id=我的Bottom'）。
+     * 同接口另一 (I) 实现者 n9u1 只被 bbd0#invoke 构造、不读 VM，不是 tab 选中，勿混。
      */
     private boolean dispatchMineTabSelect() {
         try {
@@ -717,8 +723,9 @@ public final class HomeUxHooks {
                         }
                     }
                 }
-                api.warn("khome: tab select action class drift, tried KK1.c/xF1.c/jD1.c/FC1.c"
-                        + " (6.6.0 底栏点击不走总线；6.7.1 走 xF1.c→C0、6.8.0 走 KK1.c→C0，见 findTabDispatch 注释)");
+                api.warn("khome: tab select action class drift, tried frj/KK1.c/xF1.c/jD1.c/FC1.c"
+                        + " (6.6.0 底栏点击不走总线；6.7.1 走 xF1.c→C0、6.8.0 走 KK1.c→C0、"
+                        + "6.9.0 走 frj→H0，见 findTabDispatch 注释)");
             }
             return false;
         } catch (Throwable t) {
@@ -735,7 +742,7 @@ public final class HomeUxHooks {
      */
     private Object[] findTabDispatch(Class<?> vmCls) {
         ClassLoader vmCl = vmCls.getClassLoader();
-        String[] candidates = {"KK1.c", "xF1.c", "jD1.c", "FC1.c"};
+        String[] candidates = {"frj", "KK1.c", "xF1.c", "jD1.c", "FC1.c"};
         for (int ci = 0; ci < candidates.length; ci++) {
             Class<?> actionCls;
             try {
@@ -1635,6 +1642,11 @@ public final class HomeUxHooks {
     private static final String[] BOTTOMTAB_CANDIDATES = {
             "j", "g", "a", "b", "c", "d", "e", "f", "h", "i", "k", "l", "m", "n", "o",
     };
+    // 6.9.0 起混淆改扁平名，容器函数挪出 bottomtab 包：e1d0#a(n0y0,List,Function1,
+    // Function1,Function4,qza1,Z,Function1,vza1,Composer,int)——11 参形状与旧版逐位同
+    // （p1=List、p9=Composer、p10=int），由 HomeBottomTabContainerKt$...$3$1$1 指针
+    // lambda 的字段 a 读取点 c1d0#invoke 反查构造点定位（dexsite 实证唯一）。
+    private static final String[] BOTTOMTAB_FLAT_CANDIDATES = { "e1d0" };
 
     /**
      * 底栏渲染隐藏：HomeBottomTabContainerKt（类名每轮漂移，见 {@link #BOTTOMTAB_CANDIDATES}）
@@ -1657,10 +1669,17 @@ public final class HomeUxHooks {
         // 6.7.1 里是个 Function3 lambda），所以按签名找、不按类名找。
         Method target = null;
         Class<?> owner = null;
+        java.util.List<String> names = new java.util.ArrayList<String>();
         for (String simple : BOTTOMTAB_CANDIDATES) {
+            names.add("tv.danmaku.bili.khome.widget.bottomtab." + simple);
+        }
+        for (String flat : BOTTOMTAB_FLAT_CANDIDATES) {
+            names.add(flat);
+        }
+        for (String name : names) {
             Class<?> c;
             try {
-                c = api.load(loader, "tv.danmaku.bili.khome.widget.bottomtab." + simple);
+                c = api.load(loader, name);
             } catch (Throwable t) {
                 continue;
             }

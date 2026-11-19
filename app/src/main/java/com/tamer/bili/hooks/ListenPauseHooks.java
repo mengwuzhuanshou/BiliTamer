@@ -102,7 +102,9 @@ public final class ListenPauseHooks {
      * {@code b : IMediaPlayAdapter}（真名）、{@code x : OnCompletionListener}；
      * onCompletion 体仍为 getCurrentPosition → 读容器 h/f → 转发容器 x）；
      * 6.8.0 = UQ1.m（容器换成 UQ1.t：b=IMediaPlayAdapter、x=OnCompletionListener，
-     * onCompletion 体 getCurrentPosition → 读容器 h/f → 转发 x，与 6.7.1 逐条同形）。
+     * onCompletion 体 getCurrentPosition → 读容器 h/f → 转发 x，与 6.7.1 逐条同形）；
+     * 6.9.0 = e8w0（classes25，容器 j8w0，onCompletion 体 getCurrentPosition →
+     * 读 j8w0.h(J)/f(I) → 转发 j8w0.x，全 dex 33 个监听器实现者里唯一过角色三步）。
      * 类名会整族换包且旧名会被 R8 复用，所以按「角色」验收而不是只认名字：
      * ① 实现 IMediaPlayer$OnCompletionListener；② 只有一个实例字段的 lambda 持有者；
      * ③ 那个字段的类型是播放器核心容器——判定依据是容器里必须有 IMediaPlayAdapter
@@ -111,7 +113,7 @@ public final class ListenPauseHooks {
      * 6.7.1 全量角色扫描 32 个监听器实现者里仅此一个过 ③）。
      */
     private Class<?> findListenCompletionListener() {
-        for (String cn : new String[]{"UQ1.m", "HL1.l", "lK1.j", "CE1.f"}) {
+        for (String cn : new String[]{"e8w0", "UQ1.m", "HL1.l", "lK1.j", "CE1.f"}) {
             Class<?> c;
             try {
                 c = api.load(cl, cn);
@@ -173,7 +175,7 @@ public final class ListenPauseHooks {
                 }
             }
             if (oc == null) {
-                api.warn("listen: listen-mode onCompletion not found (UQ1.m / HL1.l / lK1.j / CE1.f)");
+                api.warn("listen: listen-mode onCompletion not found (e8w0 / UQ1.m / HL1.l / lK1.j / CE1.f)");
             } else {
                 api.deoptimize(oc);
                 api.addHook("listen: completion guard", oc, new XposedInterface.Hooker() {

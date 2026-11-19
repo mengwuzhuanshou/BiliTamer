@@ -16,7 +16,8 @@ import io.github.libxposed.api.XposedInterface;
  * 实现：把该门的实现类（6.5.0=HX/c$b、HX/c$c，接口 GX.b，门方法 q1()Z；
  * 6.6.0=JX/b$b、JX/b$c，接口 IX.b，门方法 m1()Z；6.7.1=TX/d$b、TX/d$c，接口 SX.b，
  * 门方法又回到 q1()Z；6.8.0=XX/e$b、XX/e$c（classes12），门方法 o1()Z、
- * 日志方法 n1(String,Object[])，o1 体=读 b.specialType==1，dex 逐条同形）的
+ * 日志方法 n1(String,Object[])；6.9.0=wor0/b、wor0/c（classes7），门方法 a()Z、
+ * 日志方法 o(String,Object[])，a 体=读 b.specialType==1，dex 逐条同形）的
  * 「无参 boolean 门」强制返回
  * false —— 后台播放设置项始终创建。类名/方法名都会整族换，所以验收看角色形状
  * （getDanmakuParams + getPlayerParams + EssentialInfo 字段 + 恰好一个无参 boolean 方法），
@@ -43,8 +44,8 @@ public final class LiveBgHooks {
         // 6.7.1=TX.d$b/$c，6.8.0=XX.e$b/$c，门方法 q1()Z -> m1()Z -> q1()Z -> o1()Z，
         // 日志方法 p1 -> l1 -> p1 -> n1，dex 逐条同形）。
         // 名字只当入口，真正验收的是 findGateMethod 的角色形状——旧名被 R8 复用也不会误挂。
-        for (final String cn : new String[]{"XX.e$b", "XX.e$c",
-                "TX.d$b", "TX.d$c", "JX.b$b", "JX.b$c", "HX.c$b", "HX.c$c"}) {
+        for (final String cn : new String[]{"wor0$b", "wor0$c",
+                "XX.e$b", "XX.e$c", "TX.d$b", "TX.d$c", "JX.b$b", "JX.b$c", "HX.c$b", "HX.c$c"}) {
             installNamed(cn);
         }
     }

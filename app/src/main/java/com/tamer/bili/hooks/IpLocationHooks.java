@@ -29,7 +29,8 @@ import io.github.libxposed.api.XposedInterface;
  * 6.4.0 / 6.5.0 漂移（见 installCommonHeadersScope / computeWantedService 候选表）：
  *  提供者基类 up1.a -> kr1.a -> kr1.d；包装 jp1.c -> Zq1.c -> kr1.c；方法描述符
  *  jp1.g -> Zq1.g -> kr1.g（字段语义 a=包名/b=服务名/c=方法名不变）。拦截器
- *  kntr.base.moss.ignet.impl.header.b 与 MossInterceptor$e/grpc.c 为真名，跨版本稳定。
+ *  kntr.base.moss.ignet.impl.header.b 与 MossInterceptor$e/grpc.c 为真名，6.3.0-6.8.0 稳定；
+ *  6.9.0 扁平混淆把两者改名 header.a / mob0（见 COMMON_HEADERS_CANDIDATES 注释）。
  *
  * 6.6.0（9130300，dex 实证）：
  *  - 描述符族整族换包：kr1.a..n -> xr1.a..n（classes25.dex，14 个类一一对应，
@@ -61,7 +62,13 @@ public final class IpLocationHooks {
     };
 
     // MossCommonHeadersProvider（kntr.base.moss.ignet.impl.header.j）
-    private static final String COMMON_HEADERS_CLS = "kntr.base.moss.ignet.impl.header.b";
+    // 6.9.0 混淆改扁平名：拦截器外层 header.b→header.a（协程内类
+    // MossCommonHeadersProvider$getHeaders$1 的 this$0 类型坐实），suspend 入口
+    // 从 b(2 参) 变 a(u2l0,s1l0,ContinuationImpl)；二进制头存储写入点
+    // grpc.c→mob0（f(String,byte[]) 同名同形，体 = g:y9z0.b.put）。
+    private static final String[] COMMON_HEADERS_CANDIDATES = {
+            "kntr.base.moss.ignet.impl.header.a",
+            "kntr.base.moss.ignet.impl.header.b"};
 
     // 探针：j.a 观察到的服务名（每服务名只记一次，上限防刷屏）
     private final java.util.Set<String> seenServices =
@@ -79,6 +86,9 @@ public final class IpLocationHooks {
             java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
 
     private final java.util.concurrent.atomic.AtomicLong mossRpcCount =
+            new java.util.concurrent.atomic.AtomicLong(0);
+
+    private final java.util.concurrent.atomic.AtomicLong grpcEngineRpcCount =
             new java.util.concurrent.atomic.AtomicLong(0);
 
     // 改写点活体计数：once-probe 每进程只打一条，长生命周期进程里钩子「后来死了」
@@ -128,6 +138,7 @@ public final class IpLocationHooks {
         });
         // moss 部分：立即尝试，失败则延迟重试
         installCommonHeadersScope();
+        installGrpcEngineScope();
         installGrpcBinHeaderWrite();
         installRestParams();
         api.info("IpLocationHooks installed");
@@ -148,7 +159,8 @@ public final class IpLocationHooks {
 
     /** 评论区限定身份改写（v1.3，方向2 的正解）。
      *
-     *  挂点：MossCommonHeadersProvider 拦截器（kntr.base.moss.ignet.impl.header.b，name=
+     *  挂点：MossCommonHeadersProvider 拦截器（6.8.0 及以前 = kntr.base.moss.ignet.impl.header.b，
+     *  6.9.0 = header.a，name=
      *  "moss-common-headers"，priority 0）。它是 GrpcEngine 拦截器链的一员，b(chain, cont)
      *  内部同步遍历 jp1.b/jp1.d 头提供者（含 up1.a -> x-bili-metadata-bin / x-bili-device-bin）
      *  把头写进本次调用上下文 grpc.c 的头存储（grpc.d.a=String 头 / d.b=byte[] 头），
@@ -157,23 +169,42 @@ public final class IpLocationHooks {
      *   - chain.a() 即 grpc.c（继承 MossInterceptor.e，字段 b=jp1.g method 描述符），
      *     service/method 判定与改写同线程同帧，无跨线程问题；
      *   - 一元 RPC 走这里；stream tunnel 走 header.j（不受影响）。
+     *  6.9.0：入口改 a(request, descriptor, cont)，ctx(mob0) 在体内才构造，hook 期
+     *  描述符直接取第二参（s1l0）；头存储换 y9z0（a/b 两个 LinkedHashMap）。
+     *  verbose 复采再证：6.9.0 这个入口只被 getCreateTunnelHeaders 调（tunnel 旁路，
+     *  运行时从不执行），一元 RPC 走 GrpcEngine.a（见 installGrpcEngineScope）；
+     *  本腿保留作旧代宿主与 tunnel 的兜底。
      *
      *  方法为 suspend，可能在后续拦截器处挂起返回 COROUTINE_SUSPENDED——但头在本拦截器
      *  proceed 之前已入存储，两种返回形态下改写同样有效（重复进入幂等）。
      */
     private void installCommonHeadersScope() {
         try {
-            final Class<?> cls = api.load(cl, COMMON_HEADERS_CLS);
+            Class<?> cls = null;
             Method m = null;
-            for (Method mm : cls.getDeclaredMethods()) {
-                Class<?>[] ps = mm.getParameterTypes();
-                if (mm.getName().equals("b") && ps.length == 2 && !mm.isSynthetic()) {
-                    m = mm;
-                    break;
+            for (String cn : COMMON_HEADERS_CANDIDATES) {
+                Class<?> c;
+                try {
+                    c = api.load(cl, cn);
+                } catch (Throwable t) {
+                    continue;
                 }
+                for (Method mm : c.getDeclaredMethods()) {
+                    if (mm.isSynthetic()) continue;
+                    Class<?>[] ps = mm.getParameterTypes();
+                    boolean oldShape = mm.getName().equals("b") && ps.length == 2;
+                    boolean suspendShape = ps.length >= 2
+                            && ps[ps.length - 1].getName().contains("Continuation");
+                    if (oldShape || suspendShape) {
+                        cls = c;
+                        m = mm;
+                        break;
+                    }
+                }
+                if (m != null) break;
             }
             if (m == null) {
-                throw new NoSuchMethodException(COMMON_HEADERS_CLS + ".b(2-arg) not found");
+                throw new ClassNotFoundException("common headers interceptor not loadable");
             }
             api.deoptimize(m);
             api.addHook("ip: common headers scope", m, new XposedInterface.Hooker() {
@@ -186,7 +217,7 @@ public final class IpLocationHooks {
                     if (n % 200 == 1) {
                         api.info("ip: moss rpc count=" + n);
                     }
-                    String want = computeWantedService(chain.getArg(0));
+                    String want = computeWantedService(chain.getArg(0), chain.getArg(1));
                     String old = sCommonScope.get();
                     if (want != null) sCommonScope.set(want);
                     try {
@@ -198,9 +229,9 @@ public final class IpLocationHooks {
                     }
                 }
             });
-            api.info("ip: common headers scope hook ok -> " + cls.getName() + ".b");
+            api.info("ip: common headers scope hook ok -> " + cls.getName() + "." + m.getName());
         } catch (ClassNotFoundException e) {
-            api.debug("ip: " + COMMON_HEADERS_CLS + " not loaded yet, retry in " + RETRY_DELAY_MS + "ms");
+            api.debug("ip: common headers interceptor not loaded yet, retry in " + RETRY_DELAY_MS + "ms");
             retry(new Runnable() {
                 @Override public void run() {
                     installCommonHeadersScope();
@@ -211,7 +242,56 @@ public final class IpLocationHooks {
         }
     }
 
-    /** 6.5.0 主改写路径：hook kntr.base.moss.ignet.impl.grpc.c.f(String, byte[])。
+    /** 6.9.0 一元 RPC 的真 scope 接缝：GrpcEngine.a(request, descriptor, byte[], c9g0, j2l0)。
+     *  dex 实证：GrpcEngine$asyncUnaryCall$1.invokeSuspend 唯一调用它；体内 002f
+     *  new mob0(u2l0, s1l0, [B) 后同步遍历头提供者写 ctx.f ⇒ 改写窗口就在本方法内，
+     *  描述符直接是第二参。6.9.0 的 header.a 已退化成 tunnel 旁路
+     *  （getCreateTunnelHeaders 才调它，运行时从不执行）——只挂 header 会让
+     *  moss rpc 计数恒 0、限定档改写全静默（verbose 复采坐实）。
+     *  与 header 腿共存：sCommonScope 嵌套 save/restore 本就支持双层窗口。 */
+    private void installGrpcEngineScope() {
+        try {
+            Class<?> cls = api.load(cl, "kntr.base.moss.ignet.impl.grpc.GrpcEngine");
+            Method m = null;
+            for (Method mm : cls.getDeclaredMethods()) {
+                Class<?>[] ps = mm.getParameterTypes();
+                if (mm.getName().equals("a") && ps.length == 5 && ps[2] == byte[].class
+                        && mm.getReturnType() == void.class && !mm.isSynthetic()) {
+                    m = mm;
+                    break;
+                }
+            }
+            if (m == null) {
+                api.debug("ip: grpc engine scope shape not found on GrpcEngine");
+                return;
+            }
+            api.deoptimize(m);
+            api.addHook("ip: grpc engine scope", m, new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    long n = grpcEngineRpcCount.incrementAndGet();
+                    if (n % 200 == 1) {
+                        api.info("ip: grpc engine rpc count=" + n);
+                    }
+                    String want = computeWantedService(chain.getArg(0), chain.getArg(1));
+                    String old = sCommonScope.get();
+                    if (want != null) sCommonScope.set(want);
+                    try {
+                        return chain.proceed();
+                    } finally {
+                        if (want != null) {
+                            if (old == null) sCommonScope.remove(); else sCommonScope.set(old);
+                        }
+                    }
+                }
+            });
+            api.info("ip: grpc engine scope hook ok -> " + cls.getName() + "." + m.getName());
+        } catch (Throwable t) {
+            api.debug("ip: grpc engine scope unavailable: " + t);
+        }
+    }
+
+    /** 6.5.0 主改写路径：hook kntr.base.moss.ignet.impl.grpc.c.f(String, byte[])
+     *  （6.9.0 = mob0.f，同名同形，体 = 头存储 y9z0.b.put，dex 实证）。
      *  header.b.b() 原始方法体内，每个二进制提供者产出头包装后经 ctx.f(key, bytes)
      *  写入存储（grpc.d），然后才 proceed 发请求——f 是二进制头入存储的唯一入口，
      *  参数替换即等于改写请求头，时序必然赶得上。类为真名，6.3.0-6.5.0 未漂移。
@@ -225,7 +305,17 @@ public final class IpLocationHooks {
         final Class<?> grpcC;
         final Method f;
         try {
-            grpcC = api.load(cl, "kntr.base.moss.ignet.impl.grpc.c");
+            Class<?> loaded = null;
+            for (String cn : new String[]{"mob0", "kntr.base.moss.ignet.impl.grpc.c"}) {
+                try {
+                    loaded = api.load(cl, cn);
+                    break;
+                } catch (Throwable next) {
+                    // 下一候选
+                }
+            }
+            if (loaded == null) throw new ClassNotFoundException("grpc ctx impl not loadable");
+            grpcC = loaded;
             Method found = null;
             for (Method mm : grpcC.getDeclaredMethods()) {
                 if (!mm.getName().equals("f")) continue;
@@ -270,15 +360,22 @@ public final class IpLocationHooks {
                     if (!api.isIpLocationEnabled()) return chain.proceed();
                     Object v = chain.getArg(1);
                     if (!(v instanceof byte[])) return chain.proceed();
+                    String selfScope = null;
                     if (api.getIpScopeMode() == BiliConfig.IP_SCOPE_COMMENT) {
                         // 评论区限定：仅头 scope 标记在身的请求；空间页 moss 通道走 UI 时间窗
                         if (sCommonScope.get() == null && System.currentTimeMillis() >= sUiSpaceUntil) {
-                            return chain.proceed();
+                            // 6.9.0：头提供者是 suspend 协程，写点落在 GrpcEngine.a 同步窗
+                            // resume 之后（跨线程），ThreadLocal 标记得不到 ⇒ 写点拿 ctx
+                            // 自持描述符自判（MossInterceptor$e.b=s1l0，dex 实证）。
+                            String[] sp = resolveServiceAndPkg(chain.getThisObject());
+                            if (sp == null || !isArmedFamily(sp[0], sp[1])) return chain.proceed();
+                            selfScope = sp[0];
                         }
                     }
                     // 每个 scope 各留一条：原先 once-per-process，View 先打过之后
                     // 评论/历史/空间全被吞，排查「评论区没被改写」时日志读不出真相。
-                    String probeScope = String.valueOf(sCommonScope.get());
+                    String probeScope = sCommonScope.get() != null
+                            ? String.valueOf(sCommonScope.get()) : String.valueOf(selfScope);
                     logRewriteOnce("fired:" + probeScope,
                             "ip: grpc write fired key=" + key + " bytes=" + ((byte[]) v).length
                                     + " scope=" + probeScope);
@@ -296,7 +393,7 @@ public final class IpLocationHooks {
                 }
             });
             grpcWriteReady.set(true);
-            api.info("ip: grpc bin header write hook ok -> kntr.base.moss.ignet.impl.grpc.c.f");
+            api.info("ip: grpc bin header write hook ok -> " + grpcC.getName() + ".f");
         } catch (Throwable t) {
             api.error("ip: grpc bin header write hook failed", t);
         }
@@ -313,8 +410,10 @@ public final class IpLocationHooks {
     }
 
     /** 判定本次 RPC 是否需要改写身份：需要则返回服务名（作 ThreadLocal 标记），否则 null。
-     *  在 chain.proceed() 之前调用；改写本身由 up1.a.a() hook 完成。 */
-    private String computeWantedService(Object chainObj) {
+     *  在 chain.proceed() 之前调用；改写本身由 up1.a.a() hook 完成。
+     *  6.9.0 拦截器入口改收 (request, descriptor, cont)：ctx 在方法体内才构造，
+     *  hook 期拿不到 chain，描述符直接是第二参（s1l0，a/b/c 三 String 同形）。 */
+    private String computeWantedService(Object chainObj, Object descArg) {
         try {
             if (chainObj == null) return null;
             if (api.getIpScopeMode() != BiliConfig.IP_SCOPE_COMMENT) return null;
@@ -322,17 +421,21 @@ public final class IpLocationHooks {
             if (!ip) return null;
             // chain -> grpc.c 上下文（MossInterceptor$b.a()）
             Object ctx = resolveCtx(chainObj);
-            if (ctx == null) {
+            String[] sp = ctx == null ? null : resolveServiceAndPkg(ctx);
+            if (sp == null) {
+                Object g = methodDescriptorByShape(descArg);
+                if (g != null) sp = serviceFromDescriptor(g, null);
+            }
+            if (sp == null) {
                 logRewriteOnce("ctx", "ip: common headers ctx not found (chain=" + chainObj.getClass().getName() + ")");
                 return null;
             }
-            String[] sp = resolveServiceAndPkg(ctx);
-            String svc = sp == null ? null : sp[0];
-            String pkg = sp == null ? null : sp[1];
-            String method = sp == null ? null : sp[2];
-            if (svc == null && sp != null) {
+            String svc = sp[0];
+            String pkg = sp[1];
+            String method = sp[2];
+            if (svc == null) {
                 logRewriteOnce("svc", "ip: method descriptor resolved but no service string (cls="
-                        + ctx.getClass().getName() + ")");
+                        + (ctx != null ? ctx.getClass().getName() : String.valueOf(descArg)) + ")");
             }
             rememberService(svc, pkg);
             if (!isArmedFamily(svc, pkg)) return null;
@@ -378,6 +481,12 @@ public final class IpLocationHooks {
             g = methodDescriptorByShape(fieldInHierarchy(ctx, "b"));
         }
         if (g == null) return null;
+        return serviceFromDescriptor(g, ctx);
+    }
+
+    /** 描述符对象（a/b/c 三 String）→ {service, package, method}；语义移位过，两个都试。
+     *  ctx 非 null 时多一条 k 对象兜底（6.9.0 直取描述符的路径没有 ctx，传 null）。 */
+    private String[] serviceFromDescriptor(Object g, Object ctx) {
         // 6.3.0 jp1.g：service 在字段 a；6.4.0/6.5.0：a=packageName, b=serviceName，
         // c=methodName —— 语义移位过，两个都试，取像服务名的那个
         String svc = strField(g, "b");
@@ -621,7 +730,11 @@ public final class IpLocationHooks {
     private void installSpaceRestParams() {
         // 这个拦截器的类字母序随构建漂移：6.4.0=…common.api.e，6.7.1=…common.api.f
         // （e 在 6.7.1 仍存在但已没有 addCommonParam(Map)——旧名被复用，认方法不认名）。
-        String[] cand = {"com.bilibili.app.comm.list.common.api.f",
+        // 6.9.0 混淆改扁平名：空间页拦截器 = l8n0（BiliSpaceApiService 七个方法的
+        // @RequestInterceptor 注解值坐实），addCommonParam 体 = super(f1y).addCommonParam
+        // + common.api.a.a(Map)；父类 f1y 带 addCommonParamToUrl/ToBodyResult（URL 定域腿）。
+        String[] cand = {"l8n0",
+                "com.bilibili.app.comm.list.common.api.f",
                 "com.bilibili.app.comm.list.common.api.e"};
         for (final String cn : cand) {
             try {
@@ -843,38 +956,41 @@ public final class IpLocationHooks {
     }
 
     /** REST 评论/主页：按 URL 判定并改写 okhttp 请求参数。
-     *  6.3.0: Aq0.a.intercept；6.4.0: Aq0.a.intercept 消失，okhttp 拦截器迁到 Cq0.a。 */
+     *  6.3.0: Aq0.a.intercept；6.4.0: Aq0.a.intercept 消失，okhttp 拦截器迁到 Cq0.a；
+     *  6.9.0: 空间页拦截器 = l8n0（七 @RequestInterceptor 注解坐实），但 intercept
+     *  声明在基类 f1y（dex 实证 l8n0 只声明 addCommonParam）——必须沿父类链找，
+     *  只查 declared 会静默 skip 整条腿。挂到基类即覆盖全部子类拦截器，
+     *  scope 仍由 classifyRest(url) 门控，语义不变。 */
     private void installRest() throws Throwable {
         installNewCallProbe();
         installSpaceUiScope();
         installActivityProbe();
         installSpaceRestParams();
-        Class<?> aq0a = null;
+        Method m = null;
         String restClsUsed = null;
-        for (String cn : new String[]{"Aq0.a", "Cq0.a"}) {
+        for (String cn : new String[]{"l8n0", "Aq0.a", "Cq0.a"}) {
             try {
                 Class<?> c = api.load(cl, cn);
-                boolean has = false;
-                for (Method mm : c.getDeclaredMethods()) {
-                    if (mm.getName().equals("intercept") && mm.getParameterTypes().length == 1) { has = true; break; }
+                for (Class<?> k = c; k != null && k != Object.class; k = k.getSuperclass()) {
+                    for (Method mm : k.getDeclaredMethods()) {
+                        if (mm.getName().equals("intercept") && mm.getParameterTypes().length == 1) {
+                            m = mm;
+                            restClsUsed = k.getName();
+                            break;
+                        }
+                    }
+                    if (m != null) break;
                 }
-                if (has) { aq0a = c; restClsUsed = cn; break; }
+                if (m != null) break;
             } catch (Throwable next) {
                 // 下一候选
             }
         }
-        if (aq0a == null) {
-            api.warn("ip: rest interceptor (Aq0.a/Cq0.a) not present; skip");
+        if (m == null) {
+            api.warn("ip: rest interceptor (l8n0/Aq0.a/Cq0.a) not present; skip");
             return;
         }
         final String restCls = restClsUsed;
-        Method m = null;
-        for (Method mm : aq0a.getDeclaredMethods()) {
-            if (mm.getName().equals("intercept") && mm.getParameterTypes().length == 1) {
-                m = mm;
-                break;
-            }
-        }
         api.deoptimize(m);
         final Class<?> chainCls = m.getParameterTypes()[0];
         final Method reqMethod = reqMethod(chainCls);
@@ -924,8 +1040,11 @@ public final class IpLocationHooks {
      *  主页与评论都 -> android（国内版普通）。 */
     private void installRestParams() {
         if (restParamsAttempts.incrementAndGet() > MAX_RETRY) {
-            // 6.4.0 okretro 参数基类移除；REST 公共参数路径已由 Cq0.a 拦截器覆盖
-            api.warn("ip: rest params (XA0.a) not present in this version; give up");
+            // 6.4.0 okretro 参数基类移除；6.9.0 基类改名 f1y（dex 实证：l8n0 只声明
+            // addCommonParam 覆写，intercept/ToUrl/ToBodyResult 全在 f1y）。XA0.a 路死
+            // ⇒ 兜底挂基类 addCommonParam(Map)，否则评论/主页 REST 的 map 改写悬空
+            // （l8n0 覆写只覆盖空间页；服务端当下自发属地行会掩盖这个缺口）。
+            installRestParamsOnBase();
             return;
         }
         try {
@@ -977,38 +1096,7 @@ public final class IpLocationHooks {
             }
             if (acp != null) {
                 api.deoptimize(acp);
-                api.addHook("ip: rest params", acp, new XposedInterface.Hooker() {
-                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                        Object result = chain.proceed();
-                        if (!api.isIpLocationEnabled()) return result;
-                        String scope = sScope.get();
-                        if (scope == null) return result;
-                        Object arg = chain.getArg(0);
-                        if (arg instanceof java.util.Map) {
-                            java.util.Map map = (java.util.Map) arg;
-                            if (scope.startsWith("profile")) {
-                                map.put("mobi_app", "android");
-                                map.put("build", String.valueOf(2001100));
-                                map.put("channel", "master");
-                                if (api.isVerboseLoggingEnabled()) {
-                                    api.info("ip: rest params rewritten: profile -> mobi_app=android");
-                                } else {
-                                    logRewrite(probeRest, "rest/profile 改写生效");
-                                }
-                            } else if (scope.startsWith("comment")) {
-                                map.put("mobi_app", "android");
-                                map.put("build", String.valueOf(BUILD));
-                                map.put("channel", CHANNEL);
-                                if (api.isVerboseLoggingEnabled()) {
-                                    api.info("ip: rest params rewritten: comment -> mobi_app=android");
-                                } else {
-                                    logRewrite(probeRest, "rest/comment 改写生效");
-                                }
-                            }
-                        }
-                        return result;
-                    }
-                });
+                api.addHook("ip: rest params", acp, restParamsHooker());
                 api.info("ip: rest params hook ok -> XA0.a.addCommonParam");
             }
         } catch (ClassNotFoundException e) {
@@ -1021,6 +1109,71 @@ public final class IpLocationHooks {
         } catch (Throwable t) {
             api.error("ip: rest params hook failed", t);
         }
+    }
+
+    /** 6.9.0 兜底：okretro 基类 f1y.addCommonParam(Map)。toUrl 的 scope 记录已由
+     *  installRestUrlScope / installRest 覆盖，这里只挂 map 改写，不重复挂 toUrl。 */
+    private void installRestParamsOnBase() {
+        try {
+            Class<?> base = api.load(cl, "f1y");
+            Method acp = null;
+            for (Method mm : base.getDeclaredMethods()) {
+                if (mm.getName().equals("addCommonParam") && mm.getParameterTypes().length == 1
+                        && mm.getParameterTypes()[0] == java.util.Map.class) {
+                    acp = mm;
+                    break;
+                }
+            }
+            if (acp == null) {
+                api.warn("ip: rest params base (f1y) has no addCommonParam(Map); give up");
+                return;
+            }
+            api.deoptimize(acp);
+            api.addHook("ip: rest params", acp, restParamsHooker());
+            api.info("ip: rest params hook ok -> " + base.getName() + ".addCommonParam");
+        } catch (Throwable t) {
+            api.warn("ip: rest params base (f1y) not present; give up");
+        }
+    }
+
+    /** addCommonParam(Map) 的 map 改写 hooker（XA0.a 与 f1y 两代基类共用）。
+     *  定域源认 sRestUrl（okretro 参数注入路径的 URL ThreadLocal，与 l8n0 腿同判据）：
+     *  sScope 只由 okhttp intercept / 旧 XA0.a toUrl 腿设置，okretro 建参时它还是 null，
+     *  6.9.0 实测只认 sScope 会让整条腿静默空转。 */
+    private XposedInterface.Hooker restParamsHooker() {
+        return new XposedInterface.Hooker() {
+            @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                Object result = chain.proceed();
+                if (!api.isIpLocationEnabled()) return result;
+                String scope = classifyRest(sRestUrl.get());
+                if (scope == null) scope = sScope.get();
+                if (scope == null) return result;
+                Object arg = chain.getArg(0);
+                if (arg instanceof java.util.Map) {
+                    java.util.Map map = (java.util.Map) arg;
+                    if (scope.startsWith("profile")) {
+                        map.put("mobi_app", "android");
+                        map.put("build", String.valueOf(2001100));
+                        map.put("channel", "master");
+                        if (api.isVerboseLoggingEnabled()) {
+                            api.info("ip: rest params rewritten: profile -> mobi_app=android");
+                        } else {
+                            logRewrite(probeRest, "rest/profile 改写生效");
+                        }
+                    } else if (scope.startsWith("comment")) {
+                        map.put("mobi_app", "android");
+                        map.put("build", String.valueOf(BUILD));
+                        map.put("channel", CHANNEL);
+                        if (api.isVerboseLoggingEnabled()) {
+                            api.info("ip: rest params rewritten: comment -> mobi_app=android");
+                        } else {
+                            logRewrite(probeRest, "rest/comment 改写生效");
+                        }
+                    }
+                }
+                return result;
+            }
+        };
     }
 
     /** 字节流内查找子串，返回下标（无则 -1）。 */

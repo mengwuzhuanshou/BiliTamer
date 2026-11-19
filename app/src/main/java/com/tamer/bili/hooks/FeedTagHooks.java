@@ -55,11 +55,15 @@ public final class FeedTagHooks {
         // com.bilibili.pegasus.request.g 只剩一个 static a()Z，真正的解析入口搬到了
         // request.h，形状与 6.5.0 的 request.g 完全一致 a(Lokhttp3/E;)GeneralResponse）。
         // 因此「类能加载」不等于「类是对的」：必须按形状找入口，找不到就换下一个候选。
+        // 6.9.0（9200600，dex 实证）：入口再搬到 request.b，a(Lokhttp3/ResponseBody;)
+        // GeneralResponse；体内 '[Pegasus]PegasusParser' 标签 + 读 PegasusGsonParser.f/.b
+        // + 把卡片 List 写回 GeneralResponse.data，与 6.6.0 request.h 同角色。
         Class<?> parser = null;
         String parserName = null;
         Method target = null;
         StringBuilder cands = new StringBuilder();
-        for (String cn : new String[]{"com.bilibili.pegasus.request.h",
+        for (String cn : new String[]{"com.bilibili.pegasus.request.b",
+                "com.bilibili.pegasus.request.h",
                 "com.bilibili.pegasus.request.g",
                 "com.bilibili.pegasus.request.PegasusGsonParser"}) {
             Class<?> c;
@@ -93,8 +97,8 @@ public final class FeedTagHooks {
             api.debug("feedtag: no parse entry on " + cn + ", trying next candidate");
         }
         if (target == null) {
-            api.error("feedtag: parse entry not found on any candidate (request.h / request.g"
-                    + " / PegasusGsonParser), seen shapes: "
+            api.error("feedtag: parse entry not found on any candidate (request.b / request.h"
+                    + " / request.g / PegasusGsonParser), seen shapes: "
                     + (cands.length() == 0 ? "none" : cands), null);
             return;
         }

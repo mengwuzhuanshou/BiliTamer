@@ -13,8 +13,8 @@
 > Not affiliated with Bilibili Inc.; trademarks and copyrights belong to their owners.
 > For learning and research on Android hooking techniques only.
 
-面向**国际版哔哩哔哩** `com.bilibili.app.in`（实测适配 **6.3.0 / 6.4.0 / 6.5.0 / 6.6.0 / 6.7.1 / 6.8.0**）的 LSPosed 模块。
-An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`, tested against **6.3.0 / 6.4.0 / 6.5.0 / 6.6.0 / 6.7.1 / 6.8.0**).
+面向**国际版哔哩哔哩** `com.bilibili.app.in`（实测适配 **6.3.0 / 6.4.0 / 6.5.0 / 6.6.0 / 6.7.1 / 6.8.0 / 6.9.0**）的 LSPosed 模块。
+An LSPosed module for the **international Bilibili app** (`com.bilibili.app.in`, tested against **6.3.0 / 6.4.0 / 6.5.0 / 6.6.0 / 6.7.1 / 6.8.0 / 6.9.0**).
 
 ---
 
@@ -51,7 +51,7 @@ Every switch is independently reversible; the master switch disables the whole m
 ## 环境要求 / Requirements
 
 * 已 root 的 Android 设备：Magisk 或 KernelSU + Zygisk + LSPosed / rooted device with Zygisk + LSPosed;
-* 国际版哔哩哔哩 6.3.0 / 6.4.0 / 6.5.0 / 6.6.0 / 6.7.1 / 6.8.0（com.bilibili.app.in）/ international Bilibili 6.3.0 / 6.4.0 / 6.5.0 / 6.6.0 / 6.7.1 / 6.8.0.
+* 国际版哔哩哔哩 6.3.0 / 6.4.0 / 6.5.0 / 6.6.0 / 6.7.1 / 6.8.0 / 6.9.0（com.bilibili.app.in）/ international Bilibili 6.3.0 / 6.4.0 / 6.5.0 / 6.6.0 / 6.7.1 / 6.8.0 / 6.9.0.
 
 ## 使用方法 / Installation
 
@@ -155,7 +155,7 @@ process freezing). libxposed's `onPackageReady` delivers the right classLoader i
 
 ## 已知限制 / Known limitations
 
-* 仅适配实测版本 6.3.0 / 6.4.0 / 6.5.0 / 6.6.0 / 6.7.1 / 6.8.0；其它版本需自行校准混淆锚点 / tested against
+* 仅适配实测版本 6.3.0 / 6.4.0 / 6.5.0 / 6.6.0 / 6.7.1 / 6.8.0 / 6.9.0；其它版本需自行校准混淆锚点 / tested against
   these versions only;
 * 国际版评论区目前没有广告；横幅等广告仅在使用全局身份声明（v1.2 旧行为）时出现，
   默认的评论区限定模式无此副作用 / The international comment area currently has no ads;

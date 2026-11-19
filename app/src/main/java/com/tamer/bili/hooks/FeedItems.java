@@ -47,8 +47,11 @@ public final class FeedItems {
         }
     }
 
-    /** 候选解析器类名（按版本新→旧）；形状不符就换下一个。 */
+    /** 候选解析器类名（按版本新→旧）；形状不符就换下一个。
+     *  6.9.0 = request.b（a(ResponseBody)GeneralResponse，体内 Pegasus 标签 +
+     *  卡片 List 写回 GeneralResponse.data，dex 实证与 6.6.0 request.h 同角色）。 */
     private static final String[] PARSER_CANDIDATES = {
+            "com.bilibili.pegasus.request.b",
             "com.bilibili.pegasus.request.h",
             "com.bilibili.pegasus.request.g",
             "com.bilibili.pegasus.request.PegasusGsonParser",

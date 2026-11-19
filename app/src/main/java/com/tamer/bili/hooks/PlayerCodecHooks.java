@@ -170,12 +170,14 @@ public final class PlayerCodecHooks {
      *  IjkCpuInfo.getCpuName + IjkCodecHelper.isHDRSupport/isH266SupportHard，
      *  d() 里 IjkCodecHelper.isH266SupportSoft，日志 tag 就是真名 "IjkFnHelper"。
      *  6.8.0 同一形状全 dex 反查仍唯一命中（JQ1.a，classes27），c() 里同样
-     *  IjkCpuInfo.getCpuName + 8k 白名单/机型判断，职责未变。 */
+     *  IjkCpuInfo.getCpuName + 8k 白名单/机型判断，职责未变。
+     *  6.9.0 混淆改扁平名，形状反查命中 f1h0（classes23），c() 里同样
+     *  'ijkplayer.8k_support_white_list' 配置 + 机型判断，c()I/d()J 方法名未变。 */
     private void installFnval() throws Throwable {
         Class<?> fg1b = null;
         String fnvalClsUsed = null;
         StringBuilder why = new StringBuilder();
-        for (String cn : new String[]{"JQ1.a", "wL1.a", "aK1.a", "kJ1.a", "GI1.e", "FG1.b"}) {
+        for (String cn : new String[]{"f1h0", "JQ1.a", "wL1.a", "aK1.a", "kJ1.a", "GI1.e", "FG1.b"}) {
             try {
                 Class<?> c = api.load(cl, cn);
                 if (isFnvalHolder(c)) { fg1b = c; fnvalClsUsed = cn; break; }
@@ -187,7 +189,7 @@ public final class PlayerCodecHooks {
             }
         }
         if (fg1b == null) {
-            api.warn("codec: fnval class not found (JQ1.a / wL1.a / aK1.a / kJ1.a / GI1.e / FG1.b)"
+            api.warn("codec: fnval class not found (f1h0 / JQ1.a / wL1.a / aK1.a / kJ1.a / GI1.e / FG1.b)"
                     + " loader=" + cl + " why: " + why);
             return;
         }
