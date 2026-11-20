@@ -74,6 +74,14 @@ public final class HomeUxHooks {
     private Runnable badgePoller;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
 
+    /** 底栏删 tab 的落地重试（见 {@link #scheduleTabRemoval}）：100ms 一次，最多 3 秒。 */
+    private static final long TAB_REMOVAL_RETRY_MS = 100L;
+    private static final int TAB_REMOVAL_MAX_ATTEMPTS = 30;
+    private final AtomicBoolean tabRemovalLoop = new AtomicBoolean(false);
+    private int tabRemovalAttempts = 0;
+    /** 「fragment 树里还没有 MainFragment」只报一次，重试期间不刷屏。 */
+    private final AtomicBoolean mainFragMissingLogged = new AtomicBoolean(false);
+
     /** 底栏过滤后的 tab 状态（合成点击定位「我的」槽位用；默认=4 tab 第 4 格）。 */
     private volatile int mineSlotIndex = 3;
     private volatile int keptTabCount = 4;
@@ -409,17 +417,55 @@ public final class HomeUxHooks {
             overlay.addView(msgBtn, lp);
         }
         api.info("homeux: topbar decorated avatar=" + avatarEntry + " msgIcon=" + msgIcon);
-        bar.postDelayed(new Runnable() {
+        if (api.isHomeTabbarRemoveMessage() || api.isHomeTabbarRemoveMine()) {
+            scheduleTabRemoval(barGroup);
+        }
+    }
+
+    /**
+     * 底栏删 tab 的落地调度。
+     *
+     * 旧实现是 {@code bar.postDelayed(..., 3000L)}：顶栏一出现先原样摆 3 秒，到点才去找
+     * MainFragment 改模型、调 pm() 重建底栏——用户看到的就是「进主页后两三秒，消息/我的
+     * 两个 tab 才消失」。那 3 秒从来不是功能前提，只是「等宿主把 fragment 树搭好」的
+     * 一次性赌博。
+     *
+     * 现在改成事件化：立刻试一次，只有「MainFragment 还没进 fragment 树」这种确实没就绪
+     * 的情况才 100ms 后再试；首帧前通常 1～2 次就落地，界面不会先画成原样再跳变。
+     * 总窗口仍是 3 秒（30 次 × 100ms），旧实现的覆盖范围一点没少。
+     */
+    private void scheduleTabRemoval(final ViewGroup bar) {
+        if (!tabRemovalLoop.compareAndSet(false, true)) {
+            return;
+        }
+        tabRemovalAttempts = 0;
+        Runnable attempt = new Runnable() {
             @Override public void run() {
-                if (api.isHomeTabbarRemoveMessage() || api.isHomeTabbarRemoveMine()) {
-                    try {
-                        applyTabRemoval(barGroup);
-                    } catch (Throwable t) {
-                        api.error("homeux: applyTabRemoval failed", t);
+                tabRemovalAttempts++;
+                boolean done;
+                try {
+                    done = applyTabRemoval(bar);
+                } catch (Throwable t) {
+                    // 早期调用 pm() 可能在宿主尚未建好 pager 时抛一次；只报第一条，继续重试。
+                    if (tabRemovalAttempts == 1) {
+                        api.warn("homeux: applyTabRemoval not ready yet: " + t);
                     }
+                    done = false;
                 }
+                if (done) {
+                    tabRemovalLoop.set(false);
+                    return;
+                }
+                if (tabRemovalAttempts >= TAB_REMOVAL_MAX_ATTEMPTS) {
+                    tabRemovalLoop.set(false);
+                    api.warn("homeux: tab removal gave up after " + tabRemovalAttempts
+                            + " attempts (main fragment never became ready)");
+                    return;
+                }
+                uiHandler.postDelayed(this, TAB_REMOVAL_RETRY_MS);
             }
-        }, 3000L);
+        };
+        uiHandler.post(attempt);
     }
 
     private void openRoute(View v, String uri) {
@@ -863,11 +909,14 @@ public final class HomeUxHooks {
      *  3) 直接过滤当前模型列表 BaseMainFrameFragment.a0；
      *  4) 强制置脏 MainResourceManager.c.c=true 并反射调 pm() → 整链立即重建
      *     （提供者 a() 已被 hook → 过滤生效；setTabs/pager/选中全链一致）。
+     *
+     * @return true=这一趟已经做完（改完/无需改/该版本不走这条老路），不必再试；
+     *         false=fragment 树或模型还没就绪，调用方稍后重试。
      */
-    private void applyTabRemoval(final ViewGroup bar) throws Exception {
+    private boolean applyTabRemoval(final ViewGroup bar) throws Exception {
         Activity act = resolveActivity(bar);
         if (act == null) {
-            return;
+            return false;
         }
         ArrayList<Object> frags = new ArrayList<Object>();
         collectFragments(act, frags);
@@ -884,14 +933,22 @@ public final class HomeUxHooks {
             }
         }
         if (mainFrag == null) {
-            api.warn("homeux: main frame fragment not found in " + frags.size() + ": " + fragNames);
-            return;
+            if (mainFragMissingLogged.compareAndSet(false, true)) {
+                api.info("homeux: main frame fragment not ready yet ("
+                        + frags.size() + " fragment(s): " + fragNames + ") -> retry");
+            }
+            return false;
         }
         final ClassLoader uiCl = mainFrag.getClass().getClassLoader();
         api.info("homeux: live MainFragment loader=" + loaderTag(uiCl));
         if (main2FunnelsDone.compareAndSet(false, true)) {
             mainUiLoader = uiCl;
             onMainUiLoader(uiCl);
+        }
+        // fragment 已进树、但视图还没建 / 还没走到 onResume 时 pm() 没有可重建的底栏
+        // （早期调用还会撞上宿主自己的初始化），这一轮先只把漏斗装上，等就绪再动模型。
+        if (!isFragmentReady(mainFrag)) {
+            return false;
         }
         // 3) 直接过滤当前模型列表（字段 a0 在父类 BaseMainFrameFragment 上）
         boolean rmMsg = api.isHomeTabbarRemoveMessage();
@@ -900,6 +957,7 @@ public final class HomeUxHooks {
         // （jadx 显示 f356121a0，真实名随构建漂移，形状稳定）
         List<?> model = null;
         Field modelField = null;
+        boolean sawListField = false;
         for (Class<?> k = mainFrag.getClass(); k != null && k != Object.class; k = k.getSuperclass()) {
             for (Field ff : k.getDeclaredFields()) {
                 if (java.lang.reflect.Modifier.isStatic(ff.getModifiers())) {
@@ -908,7 +966,11 @@ public final class HomeUxHooks {
                 try {
                     ff.setAccessible(true);
                     Object v = ff.get(mainFrag);
-                    if (!(v instanceof List) || ((List<?>) v).isEmpty() || ((List<?>) v).size() > 8) {
+                    if (!(v instanceof List) || ((List<?>) v).size() > 8) {
+                        continue;
+                    }
+                    sawListField = true;
+                    if (((List<?>) v).isEmpty()) {
                         continue;
                     }
                     Object first = ((List<?>) v).get(0);
@@ -929,7 +991,9 @@ public final class HomeUxHooks {
             // 这条 main2 模型列表只服务 6.3.0/6.4.0，miss 属预期，不打 ERROR。
             api.debug("homeux: tab model list field not found on "
                     + mainFrag.getClass().getName() + " (legacy main2 path; khome covers 6.5.0+)");
-            return;
+            // 字段在、只是还没填（列表为空/元素还解析不出路由）→ 稍后再试；
+            // 字段根本不存在 → 这个版本不走这条老路，再等也不会出现。
+            return !sawListField;
         }
         api.info("homeux: tab model list field=" + modelField.getName() + " size=" + model.size());
         int removedMsg = 0;
@@ -974,7 +1038,7 @@ public final class HomeUxHooks {
             }
         }
         if (removedMsg + removedMine == 0) {
-            return; // 无可删项，不必重建
+            return true; // 无可删项（可能漏斗已先过滤），不必重建
         }
         // 4) 强制置脏 + 调 pm() 重建底栏与 pager
         Class<?> mgrCls = api.load(uiCl, "tv.danmaku.bili.ui.main2.resource.MainResourceManager");
@@ -1004,11 +1068,32 @@ public final class HomeUxHooks {
         }
         if (pm == null) {
             api.error("homeux: BaseMainFrameFragment.pm() not found", null);
-            return;
+            return true;
         }
         pm.setAccessible(true);
         pm.invoke(mainFrag);
         api.info("homeux: pm() invoked - bottom bar rebuilt");
+        return true;
+    }
+
+    /**
+     * MainFragment 是否已经可以安全地调 pm()：视图已建 + 已走到 onResume。
+     * onResume 在首帧绘制之前，所以仍然赶在用户看到底栏之前完成重建。
+     */
+    private static boolean isFragmentReady(Object fragment) {
+        try {
+            if (fragment.getClass().getMethod("getView").invoke(fragment) == null) {
+                return false;
+            }
+        } catch (Throwable ignored) {
+            // 拿不到视图就继续看下面的 resume 状态
+        }
+        try {
+            Object resumed = fragment.getClass().getMethod("isResumed").invoke(fragment);
+            return !(resumed instanceof Boolean) || (Boolean) resumed;
+        } catch (Throwable t) {
+            return true; // 反射不可用时按旧行为处理
+        }
     }
 
     /** 递归收集 Activity 里所有 Fragment（含子 FragmentManager）。 */
@@ -1341,23 +1426,59 @@ public final class HomeUxHooks {
         api.info("khome: probe hooks ok, ctors=" + vmCls.getDeclaredConstructors().length);
     }
 
+    /**
+     * khome 底栏模型发现的重试参数。
+     *
+     * 旧实现首探排在 2500ms、之后每 2000ms 一轮：底栏列表要等模型探明才武装，而武装
+     * 之前宿主已经用原始 tab 列表（含「消息」「我的」）画过一帧甚至几帧——这就是
+     * 「进主页两三秒后界面才变」在 6.5.0+ 上的来源。
+     *
+     * 现在先同步探一次（VM 构造返回时 tab 列表多半已经就绪，同步武装能赶在底栏首次
+     * 组合之前）；没探到再 100ms 一轮补，之后退到 500ms 继续等到 30 秒，覆盖慢网首屏
+     * 配置回包。
+     */
+    private static final long KHOME_PROBE_FAST_MS = 100L;
+    private static final long KHOME_PROBE_SLOW_MS = 500L;
+    private static final int KHOME_PROBE_FAST_ATTEMPTS = 30;
+    private static final int KHOME_PROBE_MAX_ATTEMPTS = 90;
+
     private void scheduleKhomeDiscovery() {
+        boolean armed;
+        try {
+            armed = discoverKhomeTabModel();
+        } catch (Throwable t) {
+            api.error("khome: discovery failed", t);
+            armed = false;
+        }
+        if (armed) {
+            return;
+        }
+        khomeProbeAttempts++;
+        postKhomeProbe();
+    }
+
+    private void postKhomeProbe() {
         uiHandler.postDelayed(new Runnable() {
             @Override public void run() {
+                boolean armed;
                 try {
-                    if (!discoverKhomeTabModel()) {
-                        khomeProbeAttempts++;
-                        if (khomeProbeAttempts <= 15) {
-                            uiHandler.postDelayed(this, 2000L);
-                        } else {
-                            api.warn("khome: tab model discovery gave up after " + khomeProbeAttempts + " attempts");
-                        }
-                    }
+                    armed = discoverKhomeTabModel();
                 } catch (Throwable t) {
                     api.error("khome: discovery failed", t);
+                    armed = false;
+                }
+                if (armed) {
+                    return;
+                }
+                khomeProbeAttempts++;
+                if (khomeProbeAttempts <= KHOME_PROBE_MAX_ATTEMPTS) {
+                    uiHandler.postDelayed(this, khomeProbeAttempts <= KHOME_PROBE_FAST_ATTEMPTS
+                            ? KHOME_PROBE_FAST_MS : KHOME_PROBE_SLOW_MS);
+                } else {
+                    api.warn("khome: tab model discovery gave up after " + khomeProbeAttempts + " attempts");
                 }
             }
-        }, 2500L);
+        }, KHOME_PROBE_FAST_MS);
     }
 
     /** true=发现并武装过滤；false=数据未就绪（继续轮询）。 */
@@ -1449,8 +1570,11 @@ public final class HomeUxHooks {
             }
         }
         if (bestChildCls == null || bestScore < 20) {
-            api.warn("khome: no bottom-tab-like list yet (need bools>=2), candidates:"
-                    + (cands.length() == 0 ? " none" : cands.toString()));
+            // 100ms 一轮的重试下这条不能每轮都打：只留首轮与每 30 轮一条，校准信息不丢。
+            if (khomeProbeAttempts == 0 || khomeProbeAttempts % 30 == 0) {
+                api.warn("khome: no bottom-tab-like list yet (need bools>=2), candidates:"
+                        + (cands.length() == 0 ? " none" : cands.toString()));
+            }
             return false;
         }
         khomePageStateCls = bestChildCls;
@@ -1806,27 +1930,37 @@ public final class HomeUxHooks {
         }
         badgePoller = new Runnable() {
             @Override public void run() {
+                boolean ready = false;
                 try {
-                    updateBadge();
+                    ready = updateBadge();
                 } catch (Throwable t) {
                     if (badgeProbe.compareAndSet(false, true)) {
                         api.error("homeux: badge update failed", t);
                     }
                 }
-                uiHandler.postDelayed(this, 4000L);
+                // 数据源还没起来时别等满 4 秒：短间隔补几次，把「进主页就有红点」补上。
+                if (!ready && badgeFastAttempts < 10) {
+                    badgeFastAttempts++;
+                    uiHandler.postDelayed(this, 300L);
+                } else {
+                    uiHandler.postDelayed(this, 4000L);
+                }
             }
         };
-        uiHandler.postDelayed(badgePoller, 1500L);
+        uiHandler.post(badgePoller);
     }
 
-    private void updateBadge() {
+    private int badgeFastAttempts = 0;
+
+    /** @return true=这次读到了可信未读数（数据源已就绪）。 */
+    private boolean updateBadge() {
         TextView badge = msgBadgeView;
         if (badge == null) {
-            return;
+            return true; // 没有角标视图，无需再补
         }
         int n = readUnreadCount();
         if (n < 0) {
-            return; // 数据源不可用，保持原状
+            return false; // 数据源不可用，保持原状
         }
         if (n > 0) {
             badge.setText(n > 99 ? "99+" : String.valueOf(n));
@@ -1834,6 +1968,7 @@ public final class HomeUxHooks {
         } else {
             badge.setVisibility(View.GONE);
         }
+        return true;
     }
 
     /**
